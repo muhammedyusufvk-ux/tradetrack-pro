@@ -1,3 +1,5 @@
+import { collection, getDocs, addDoc } from "firebase/firestore";
+import { db } from "./firebase";
 import { useState, useEffect, useMemo } from "react";
 
 // ── Storage helpers (localStorage for real hosting) ──────────────────────────
