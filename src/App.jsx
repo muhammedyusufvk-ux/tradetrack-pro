@@ -1,21 +1,14 @@
-import { collection, getDocs, addDoc } from "firebase/firestore";
-import { db } from "./firebase";
 import { useState, useEffect, useMemo } from "react";
-import { initializeApp } from "firebase/app";
-import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot, serverTimestamp } from "firebase/firestore";
+import { db } from "./firebase";
 
-// ── Firebase ──────────────────────────────────────────────────────────────────
-const firebaseConfig = {
-  apiKey: "AIzaSyDuoMRmRqh05uxbOdoVjV88IskljmR1HJk",
-  authDomain: "tradetrack-pro-f2173.firebaseapp.com",
-  projectId: "tradetrack-pro-f2173",
-  storageBucket: "tradetrack-pro-f2173.firebasestorage.app",
-  messagingSenderId: "545737192612",
-  appId: "1:545737192612:web:e4a379b37b1e2bb8256231",
-  measurementId: "G-HPQW04VEDP"
-};
-const app = initializeApp(firebaseConfig);
-const db = getFirestore(app);
+import {
+  collection,
+  doc,
+  setDoc,
+  deleteDoc,
+  onSnapshot,
+  serverTimestamp
+} from "firebase/firestore";
 
 // ── Firestore helpers ─────────────────────────────────────────────────────────
 const Col = {
@@ -714,3 +707,4 @@ function FInput({ label, value, onChange, placeholder, type = "text" }) { return
 function FSelect({ label, value, onChange, options }) { return <div style={{ marginBottom: 12 }}><label style={{ fontSize: 11, color: "#6b7280", display: "block", marginBottom: 4, textTransform: "uppercase", letterSpacing: .5 }}>{label}</label><select value={value} onChange={e => onChange(e.target.value)} style={{ width: "100%", background: "#080810", border: "1px solid #1a1a35", color: "#e2e0f0", borderRadius: 8, padding: "10px 12px", fontSize: 14, boxSizing: "border-box" }}><option value="">-- Select --</option>{options.map(o => <option key={o.v} value={o.v}>{o.l}</option>)}</select></div>; }
 function Empty({ icon, text }) { return <div style={{ textAlign: "center", padding: "40px 20px", color: "#4b5563" }}><div style={{ fontSize: 40 }}>{icon}</div><div style={{ marginTop: 8, fontSize: 14 }}>{text}</div></div>; }
 const inputSt = { background: "#0d0d1f", border: "1px solid #1a1a35", color: "#e2e0f0", borderRadius: 8, padding: "9px 12px", fontSize: 13, outline: "none", width: "100%", boxSizing: "border-box" };
+// test
