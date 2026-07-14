@@ -146,8 +146,7 @@ const sendDailySummary = (outlets, collections, sales, contact) => {
 function LoginScreen({ pins, onLogin }) {
   const [pin, setPin] = useState(""); const [err, setErr] = useState(false);
   const tryLogin = () => {
-    if (pin === pins.owner) { onLogin("owner"); setPin(""); }
-    else if (pin === pins.staff) { onLogin("staff"); setPin(""); }
+    if (pin === pins.owner) { onLogin(); setPin(""); }
     else { setErr(true); setTimeout(() => setErr(false), 1500); setPin(""); }
   };
   return (
@@ -158,12 +157,12 @@ function LoginScreen({ pins, onLogin }) {
       <div style={{ fontSize: 10, color: "#2a2a4a", letterSpacing: 2, textTransform: "uppercase", marginBottom: 36 }}>Glassware & Ceramics</div>
       <div style={{ background: "#0d0d1f", borderRadius: 16, padding: 28, width: "100%", maxWidth: 320, border: "1px solid #1a1a35" }}>
         <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 6, textAlign: "center", color: "#e2e0f0" }}>Enter PIN</div>
-        <div style={{ fontSize: 12, color: "#4b5563", textAlign: "center", marginBottom: 20 }}>Owner or Staff PIN to continue</div>
+        <div style={{ fontSize: 12, color: "#4b5563", textAlign: "center", marginBottom: 20 }}>Enter your PIN to continue</div>
         <input type="password" inputMode="numeric" value={pin} onChange={e => setPin(e.target.value)} onKeyDown={e => e.key === "Enter" && tryLogin()} placeholder="••••" maxLength={8}
           style={{ width: "100%", background: "#080810", border: `1px solid ${err ? "#ef4444" : "#1a1a35"}`, color: "#e2e0f0", borderRadius: 10, padding: "14px", fontSize: 22, textAlign: "center", letterSpacing: 8, boxSizing: "border-box", outline: "none", marginBottom: err ? 4 : 12 }} />
         {err && <div style={{ color: "#ef4444", fontSize: 12, textAlign: "center", marginBottom: 10 }}>Wrong PIN. Try again.</div>}
         <button onClick={tryLogin} style={{ width: "100%", background: "#7c3aed", border: "none", color: "#fff", borderRadius: 10, padding: 13, fontSize: 15, fontWeight: 700, cursor: "pointer" }}>Login</button>
-        <div style={{ fontSize: 11, color: "#2a2a4a", textAlign: "center", marginTop: 16 }}>Default: Owner PIN 1234 · Staff PIN 0000</div>
+        <div style={{ fontSize: 11, color: "#2a2a4a", textAlign: "center", marginTop: 16 }}>Default PIN: 1234</div>
       </div>
     </div>
   );
@@ -176,25 +175,25 @@ export default function App() {
   const [collections, colsLoaded]      = useCollection(Col.collections);
   const [activityLog, logLoaded]       = useCollection(Col.activityLog);
   const [targets, targetsLoaded]       = useSingleDoc(Col.targets, "config", { daily: 0, monthly: 0, ownerContact: "" });
-  const [pinsDoc, pinsLoaded]          = useSingleDoc(Col.pins, "config", { owner: "1234", staff: "0000" });
+  const [pinsDoc, pinsLoaded]          = useSingleDoc(Col.pins, "config", { owner: "1234" });
 
   const loaded = outletsLoaded && salesLoaded && colsLoaded && logLoaded && targetsLoaded && pinsLoaded;
 
-  const [role, setRole]       = useState(null);
+  const [loggedIn, setLoggedIn] = useState(false);
   const [tab, setTab]         = useState("Dashboard");
   const [search, setSearch]   = useState("");
   const [areaFilter, setAreaFilter] = useState("All");
   const [modal, setModal]     = useState(null);
   const [editing, setEditing] = useState(null);
+  const [editSaleRecord, setEditSaleRecord] = useState(null);
+  const [editCollectionRecord, setEditCollectionRecord] = useState(null);
   const [toast, setToast]     = useState(null);
 
   const showToast = (msg, type = "success") => { setToast({ msg, type }); setTimeout(() => setToast(null), 2500); };
-  const isOwner = role === "owner";
-  const isStaff = role === "staff";
 
   const log = async (action, detail) => {
     const id = uid();
-    await saveDoc(Col.activityLog, id, { id, action, detail, role, ts: nowTs(), date: todayStr() });
+    await saveDoc(Col.activityLog, id, { id, action, detail, ts: nowTs(), date: todayStr() });
   };
 
   // Outlet helpers
@@ -220,24 +219,82 @@ export default function App() {
 
   const addSale = async (data) => {
     const id = uid();
-    await saveDoc(Col.sales, id, { id, role, ...data });
+    await saveDoc(Col.sales, id, { id, ...data });
     const outlet = outlets.find(o => o.id === data.outletId);
     await saveDoc(Col.outlets, data.outletId, { ...outlet, totalDue: (outlet.totalDue || 0) + data.amount });
     await log("Sale", `${outlet?.name} — ${fmt(data.amount)}`);
     showToast("Sale recorded!");
   };
 
+  // Editing a sale re-applies the amount difference to the outlet's due,
+  // and correctly moves the due amount across outlets if the outlet was changed.
+  const updateSale = async (id, data) => {
+    const oldSale = sales.find(s => s.id === id);
+    if (!oldSale) return;
+    if (oldSale.outletId !== data.outletId) {
+      const oldOutlet = outlets.find(o => o.id === oldSale.outletId);
+      if (oldOutlet) await saveDoc(Col.outlets, oldOutlet.id, { ...oldOutlet, totalDue: Math.max(0, (oldOutlet.totalDue || 0) - oldSale.amount) });
+      const newOutlet = outlets.find(o => o.id === data.outletId);
+      if (newOutlet) await saveDoc(Col.outlets, newOutlet.id, { ...newOutlet, totalDue: (newOutlet.totalDue || 0) + data.amount });
+    } else {
+      const outlet = outlets.find(o => o.id === data.outletId);
+      if (outlet) await saveDoc(Col.outlets, data.outletId, { ...outlet, totalDue: Math.max(0, (outlet.totalDue || 0) + (data.amount - oldSale.amount)) });
+    }
+    await saveDoc(Col.sales, id, { ...oldSale, ...data });
+    const outlet2 = outlets.find(o => o.id === data.outletId);
+    await log("Edit Sale", `${outlet2?.name || ""} — ${fmt(data.amount)}`);
+    showToast("Sale updated!");
+  };
+
+  const deleteSale = async (s) => {
+    if (!window.confirm(`Delete this sale of ${fmt(s.amount)}?`)) return;
+    const outlet = outlets.find(o => o.id === s.outletId);
+    if (outlet) await saveDoc(Col.outlets, outlet.id, { ...outlet, totalDue: Math.max(0, (outlet.totalDue || 0) - s.amount) });
+    await delDoc(Col.sales, s.id);
+    await log("Delete Sale", `${outlet?.name || ""} — ${fmt(s.amount)}`);
+    showToast("Sale deleted!");
+  };
+
   const addCollection = async (data) => {
     const id = uid();
-    await saveDoc(Col.collections, id, { id, role, ...data });
+    await saveDoc(Col.collections, id, { id, ...data });
     const outlet = outlets.find(o => o.id === data.outletId);
     await saveDoc(Col.outlets, data.outletId, { ...outlet, totalDue: Math.max(0, (outlet.totalDue || 0) - data.amount) });
     await log("Collection", `${outlet?.name} — ${fmt(data.amount)}`);
     showToast("Collection saved!");
   };
 
+  // Editing a collection reverses the old amount's effect and applies the new one,
+  // moving the due across outlets if the outlet was changed.
+  const updateCollection = async (id, data) => {
+    const oldCol = collections.find(c => c.id === id);
+    if (!oldCol) return;
+    if (oldCol.outletId !== data.outletId) {
+      const oldOutlet = outlets.find(o => o.id === oldCol.outletId);
+      if (oldOutlet) await saveDoc(Col.outlets, oldOutlet.id, { ...oldOutlet, totalDue: (oldOutlet.totalDue || 0) + oldCol.amount });
+      const newOutlet = outlets.find(o => o.id === data.outletId);
+      if (newOutlet) await saveDoc(Col.outlets, newOutlet.id, { ...newOutlet, totalDue: Math.max(0, (newOutlet.totalDue || 0) - data.amount) });
+    } else {
+      const outlet = outlets.find(o => o.id === data.outletId);
+      if (outlet) await saveDoc(Col.outlets, data.outletId, { ...outlet, totalDue: Math.max(0, (outlet.totalDue || 0) - (data.amount - oldCol.amount)) });
+    }
+    await saveDoc(Col.collections, id, { ...oldCol, ...data });
+    const outlet2 = outlets.find(o => o.id === data.outletId);
+    await log("Edit Collection", `${outlet2?.name || ""} — ${fmt(data.amount)}`);
+    showToast("Collection updated!");
+  };
+
+  const deleteCollection = async (c) => {
+    if (!window.confirm(`Delete this collection of ${fmt(c.amount)}?`)) return;
+    const outlet = outlets.find(o => o.id === c.outletId);
+    if (outlet) await saveDoc(Col.outlets, outlet.id, { ...outlet, totalDue: (outlet.totalDue || 0) + c.amount });
+    await delDoc(Col.collections, c.id);
+    await log("Delete Collection", `${outlet?.name || ""} — ${fmt(c.amount)}`);
+    showToast("Collection deleted!");
+  };
+
   const saveTargets = async (t) => { await saveDoc(Col.targets, "config", t); showToast("Targets saved!"); };
-  const savePins = async (p) => { await saveDoc(Col.pins, "config", p); await log("Settings", "PINs updated"); showToast("PINs saved!"); };
+  const savePins = async (p) => { await saveDoc(Col.pins, "config", p); await log("Settings", "PIN updated"); showToast("PIN saved!"); };
 
   const areas = useMemo(() => ["All", ...new Set(outlets.map(o => o.area).filter(Boolean))], [outlets]);
   const filteredOutlets = useMemo(() => {
@@ -282,9 +339,9 @@ export default function App() {
     </div>
   );
 
-  if (!role) return <LoginScreen pins={pinsDoc} onLogin={(r) => { setRole(r); log("Login", `Logged in as ${r}`); setTab("Dashboard"); }} />;
+  if (!loggedIn) return <LoginScreen pins={pinsDoc} onLogin={() => { setLoggedIn(true); log("Login", "Logged in"); setTab("Dashboard"); }} />;
 
-  const TABS = isOwner ? ["Dashboard","Outlets","Sales","Collections","Dues & Alerts","Reports","Activity Log","Settings"] : ["Dashboard","Outlets","Sales","Collections"];
+  const TABS = ["Dashboard","Outlets","Sales","Collections","Dues & Alerts","Reports","Activity Log","Settings"];
 
   return (
     <div style={{ minHeight: "100vh", background: "#080810", color: "#e2e0f0", fontFamily: "'Sora',sans-serif", paddingBottom: 80 }}>
@@ -297,21 +354,15 @@ export default function App() {
           <div>
             <div style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: 19, color: "#a78bfa", letterSpacing: 1 }}>◈ TradeTrack Pro</div>
             <div style={{ fontSize: 9, color: "#3a3a5a", letterSpacing: 2, textTransform: "uppercase" }}>AL LAMIA ENTERPRISES</div>
-            <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 1 }}>
-              <div style={{ width: 6, height: 6, borderRadius: "50%", background: isOwner ? "#a78bfa" : "#22c55e" }} />
-              <span style={{ fontSize: 10, color: "#4b5563", textTransform: "uppercase", letterSpacing: 1 }}>{isOwner ? "Owner" : "Staff"}</span>
-            </div>
           </div>
           <div style={{ display: "flex", gap: 5, flexWrap: "wrap", justifyContent: "flex-end" }}>
-            {isOwner && <Btn color="#7c3aed" onClick={() => { setEditing(null); setModal("outlet"); }}>+ Outlet</Btn>}
+            <Btn color="#7c3aed" onClick={() => { setEditing(null); setModal("outlet"); }}>+ Outlet</Btn>
             <Btn color="#0369a1" onClick={() => setModal("sale")}>+ Sale</Btn>
             <Btn color="#065f46" onClick={() => setModal("collection")}>+ Collect</Btn>
-            <Btn color="#1a1a2e" onClick={() => { log("Logout", ""); setRole(null); setTab("Dashboard"); }}>🚪</Btn>
+            <Btn color="#1a1a2e" onClick={() => { log("Logout", ""); setLoggedIn(false); setTab("Dashboard"); }}>🚪</Btn>
           </div>
         </div>
       </div>
-
-      {isStaff && <div style={{ background: "#1c1200", borderBottom: "1px solid #78350f", padding: "7px 16px", fontSize: 12, color: "#f59e0b", textAlign: "center" }}>⚠️ Staff mode — entries only for today. Past records are locked.</div>}
 
       {/* Tabs */}
       <div style={{ background: "#0d0d1f", borderBottom: "1px solid #1a1a35", overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
@@ -335,42 +386,32 @@ export default function App() {
               ))}
             </div>
 
-            {isOwner && <>
-              <div style={{ background: "#0d0d1f", borderRadius: 12, padding: 14, marginBottom: 14, border: "1px solid #1a1a35" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-                  <span style={{ fontWeight: 700, fontSize: 13, color: "#a78bfa" }}>🎯 Collection Targets</span>
-                  <button onClick={() => setModal("target")} style={{ background: "none", border: "1px solid #2a2a4a", color: "#6b7280", borderRadius: 6, padding: "3px 10px", fontSize: 11, cursor: "pointer" }}>Set</button>
-                </div>
-                <ProgressBar label="Today" current={todayCollected} target={targets.daily} fmt={fmt} color="#22c55e" />
-                <ProgressBar label="This Month" current={monthCollected} target={targets.monthly} fmt={fmt} color="#60a5fa" />
+            <div style={{ background: "#0d0d1f", borderRadius: 12, padding: 14, marginBottom: 14, border: "1px solid #1a1a35" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                <span style={{ fontWeight: 700, fontSize: 13, color: "#a78bfa" }}>🎯 Collection Targets</span>
+                <button onClick={() => setModal("target")} style={{ background: "none", border: "1px solid #2a2a4a", color: "#6b7280", borderRadius: 6, padding: "3px 10px", fontSize: 11, cursor: "pointer" }}>Set</button>
               </div>
-              <div style={{ background: "#0d0d1f", borderRadius: 12, padding: 14, marginBottom: 14, border: "1px solid #1a1a35" }}>
-                <div style={{ fontWeight: 700, fontSize: 13, color: "#a78bfa", marginBottom: 12 }}>🏆 Top Outlets</div>
-                {topOutlets.length === 0 && <div style={{ color: "#4b5563", fontSize: 13 }}>No data yet.</div>}
-                {topOutlets.map((o, i) => {
-                  const total = collections.filter(c => c.outletId === o.id).reduce((s, c) => s + c.amount, 0);
-                  const trend = getOutletTrend(o.id);
-                  return <div key={o.id} onClick={() => { setEditing(o); setModal("outletDetail"); }} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: "1px solid #111120", cursor: "pointer" }}>
-                    <div style={{ width: 26, height: 26, borderRadius: "50%", background: i === 0 ? "#f59e0b" : i === 1 ? "#9ca3af" : i === 2 ? "#b45309" : "#1a1a2e", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700, color: i < 3 ? "#000" : "#6b7280", flexShrink: 0 }}>{i + 1}</div>
-                    <div style={{ flex: 1, minWidth: 0 }}><div style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{o.name}</div><div style={{ fontSize: 11, color: trend.color }}>{trend.label}</div></div>
-                    <div style={{ textAlign: "right", flexShrink: 0 }}><div style={{ fontSize: 13, color: "#22c55e", fontWeight: 600 }}>{fmt(total)}</div>{o.totalDue > 0 && <div style={{ fontSize: 10, color: "#ef4444" }}>{fmt(o.totalDue)} due</div>}</div>
-                  </div>;
-                })}
-              </div>
-              <div style={{ background: "#0d0d1f", borderRadius: 12, padding: 14, border: "1px solid #1a1a35" }}>
-                <div style={{ fontWeight: 700, fontSize: 13, color: "#a78bfa", marginBottom: 8 }}>💬 Daily WhatsApp Summary</div>
-                <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 10 }}>Send today's report to owner's WhatsApp in one tap.</div>
-                <button onClick={() => sendDailySummary(outlets, collections, sales, targets.ownerContact)} style={{ background: "#1a3a2a", border: "1px solid #14532d", color: "#4ade80", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer", width: "100%" }}>📤 Send Today's Summary</button>
-              </div>
-            </>}
-
-            {isStaff && <div style={{ background: "#0d0d1f", borderRadius: 12, padding: 14, border: "1px solid #1a1a35" }}>
-              <div style={{ fontWeight: 700, fontSize: 13, color: "#a78bfa", marginBottom: 12 }}>📋 Your Entries Today</div>
-              {[...collections.filter(c => c.date === todayStr() && c.role === "staff"), ...sales.filter(s => s.date === todayStr() && s.role === "staff")].length === 0
-                ? <div style={{ color: "#4b5563", fontSize: 13 }}>No entries yet today.</div>
-                : <>{collections.filter(c => c.date === todayStr() && c.role === "staff").map(c => { const o = outlets.find(x => x.id === c.outletId); return <div key={c.id} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: "1px solid #111120", fontSize: 13 }}><span style={{ color: "#6b7280" }}>{o?.name} · 💰 collect</span><span style={{ color: "#22c55e", fontWeight: 600 }}>{fmt(c.amount)}</span></div>; })}
-                {sales.filter(s => s.date === todayStr() && s.role === "staff").map(s => { const o = outlets.find(x => x.id === s.outletId); return <div key={s.id} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: "1px solid #111120", fontSize: 13 }}><span style={{ color: "#6b7280" }}>{o?.name} · 📦 sale</span><span style={{ color: "#60a5fa", fontWeight: 600 }}>{fmt(s.amount)}</span></div>; })}</>}
-            </div>}
+              <ProgressBar label="Today" current={todayCollected} target={targets.daily} fmt={fmt} color="#22c55e" />
+              <ProgressBar label="This Month" current={monthCollected} target={targets.monthly} fmt={fmt} color="#60a5fa" />
+            </div>
+            <div style={{ background: "#0d0d1f", borderRadius: 12, padding: 14, marginBottom: 14, border: "1px solid #1a1a35" }}>
+              <div style={{ fontWeight: 700, fontSize: 13, color: "#a78bfa", marginBottom: 12 }}>🏆 Top Outlets</div>
+              {topOutlets.length === 0 && <div style={{ color: "#4b5563", fontSize: 13 }}>No data yet.</div>}
+              {topOutlets.map((o, i) => {
+                const total = collections.filter(c => c.outletId === o.id).reduce((s, c) => s + c.amount, 0);
+                const trend = getOutletTrend(o.id);
+                return <div key={o.id} onClick={() => { setEditing(o); setModal("outletDetail"); }} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: "1px solid #111120", cursor: "pointer" }}>
+                  <div style={{ width: 26, height: 26, borderRadius: "50%", background: i === 0 ? "#f59e0b" : i === 1 ? "#9ca3af" : i === 2 ? "#b45309" : "#1a1a2e", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700, color: i < 3 ? "#000" : "#6b7280", flexShrink: 0 }}>{i + 1}</div>
+                  <div style={{ flex: 1, minWidth: 0 }}><div style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{o.name}</div><div style={{ fontSize: 11, color: trend.color }}>{trend.label}</div></div>
+                  <div style={{ textAlign: "right", flexShrink: 0 }}><div style={{ fontSize: 13, color: "#22c55e", fontWeight: 600 }}>{fmt(total)}</div>{o.totalDue > 0 && <div style={{ fontSize: 10, color: "#ef4444" }}>{fmt(o.totalDue)} due</div>}</div>
+                </div>;
+              })}
+            </div>
+            <div style={{ background: "#0d0d1f", borderRadius: 12, padding: 14, border: "1px solid #1a1a35" }}>
+              <div style={{ fontWeight: 700, fontSize: 13, color: "#a78bfa", marginBottom: 8 }}>💬 Daily WhatsApp Summary</div>
+              <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 10 }}>Send today's report to owner's WhatsApp in one tap.</div>
+              <button onClick={() => sendDailySummary(outlets, collections, sales, targets.ownerContact)} style={{ background: "#1a3a2a", border: "1px solid #14532d", color: "#4ade80", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer", width: "100%" }}>📤 Send Today's Summary</button>
+            </div>
           </div>
         )}
 
@@ -381,7 +422,7 @@ export default function App() {
             {areas.length > 1 && <div style={{ display: "flex", gap: 6, marginBottom: 12, overflowX: "auto", paddingBottom: 4 }}>{areas.map(a => <button key={a} onClick={() => setAreaFilter(a)} style={{ background: areaFilter === a ? "#7c3aed" : "#1a1a2e", border: "none", color: areaFilter === a ? "#fff" : "#6b7280", borderRadius: 20, padding: "5px 12px", fontSize: 12, cursor: "pointer", whiteSpace: "nowrap" }}>{a}</button>)}</div>}
             <div style={{ fontSize: 12, color: "#4b5563", marginBottom: 10 }}>{filteredOutlets.length} outlets · synced live ☁️</div>
             {filteredOutlets.length === 0 && <Empty icon="🏪" text="No outlets found." />}
-            {filteredOutlets.map(o => <OutletCard key={o.id} outlet={o} collections={collections} fmt={fmt} isOwner={isOwner} trend={getOutletTrend(o.id)}
+            {filteredOutlets.map(o => <OutletCard key={o.id} outlet={o} collections={collections} fmt={fmt} trend={getOutletTrend(o.id)}
               onEdit={() => { setEditing(o); setModal("outlet"); }}
               onDelete={() => deleteOutlet(o)}
               onCollect={() => { setEditing(o); setModal("collection"); }}
@@ -398,10 +439,14 @@ export default function App() {
             <div style={{ fontSize: 12, color: "#4b5563", marginBottom: 10 }}>{sales.length} records</div>
             {sales.length === 0 && <Empty icon="📦" text="No sales yet." />}
             {[...sales].sort((a, b) => new Date(b.date) - new Date(a.date)).map(s => {
-              const o = outlets.find(x => x.id === s.outletId); const frozen = isStaff && s.date !== todayStr();
-              return <div key={s.id} style={{ background: "#0d0d1f", borderRadius: 10, padding: "12px 14px", marginBottom: 8, border: "1px solid #1a1a35", display: "flex", justifyContent: "space-between", alignItems: "center", opacity: frozen ? 0.45 : 1 }}>
+              const o = outlets.find(x => x.id === s.outletId);
+              return <div key={s.id} style={{ background: "#0d0d1f", borderRadius: 10, padding: "12px 14px", marginBottom: 8, border: "1px solid #1a1a35", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <div><div style={{ fontWeight: 600, fontSize: 14 }}>{o?.name || "?"}</div><div style={{ fontSize: 11, color: "#4b5563", marginTop: 2 }}>{s.date}{s.items ? ` · ${s.items}` : ""}{s.deliveryStatus ? ` · ${s.deliveryStatus === "delivered" ? "✅" : "🕐"} ${s.deliveryStatus}` : ""}</div></div>
-                <div style={{ textAlign: "right" }}><div style={{ color: "#60a5fa", fontWeight: 700 }}>{fmt(s.amount)}</div>{frozen && <div style={{ fontSize: 10, color: "#4b5563" }}>🔒 locked</div>}</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <div style={{ color: "#60a5fa", fontWeight: 700 }}>{fmt(s.amount)}</div>
+                  <SmBtn color="#1e1e35" onClick={() => { setEditSaleRecord(s); setModal("editSale"); }}>✏️</SmBtn>
+                  <SmBtn color="#3b0a0a" onClick={() => deleteSale(s)}>🗑</SmBtn>
+                </div>
               </div>;
             })}
           </div>
@@ -413,17 +458,21 @@ export default function App() {
             <div style={{ fontSize: 12, color: "#4b5563", marginBottom: 10 }}>{collections.length} records</div>
             {collections.length === 0 && <Empty icon="💰" text="No collections yet." />}
             {[...collections].sort((a, b) => new Date(b.date) - new Date(a.date)).map(c => {
-              const o = outlets.find(x => x.id === c.outletId); const frozen = isStaff && c.date !== todayStr();
-              return <div key={c.id} style={{ background: "#0d0d1f", borderRadius: 10, padding: "12px 14px", marginBottom: 8, border: "1px solid #1a1a35", display: "flex", justifyContent: "space-between", alignItems: "center", opacity: frozen ? 0.45 : 1 }}>
+              const o = outlets.find(x => x.id === c.outletId);
+              return <div key={c.id} style={{ background: "#0d0d1f", borderRadius: 10, padding: "12px 14px", marginBottom: 8, border: "1px solid #1a1a35", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <div><div style={{ fontWeight: 600, fontSize: 14 }}>{o?.name || "?"}</div><div style={{ fontSize: 11, color: "#4b5563", marginTop: 2 }}>{c.date}{c.payMethod ? ` · ${c.payMethod}` : ""}{c.note ? ` · ${c.note}` : ""}</div></div>
-                <div style={{ textAlign: "right" }}><div style={{ color: "#22c55e", fontWeight: 700 }}>{fmt(c.amount)}</div>{frozen && <div style={{ fontSize: 10, color: "#4b5563" }}>🔒 locked</div>}</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <div style={{ color: "#22c55e", fontWeight: 700 }}>{fmt(c.amount)}</div>
+                  <SmBtn color="#1e1e35" onClick={() => { setEditCollectionRecord(c); setModal("editCollection"); }}>✏️</SmBtn>
+                  <SmBtn color="#3b0a0a" onClick={() => deleteCollection(c)}>🗑</SmBtn>
+                </div>
               </div>;
             })}
           </div>
         )}
 
         {/* DUES & ALERTS */}
-        {tab === "Dues & Alerts" && isOwner && (
+        {tab === "Dues & Alerts" && (
           <div>
             {["danger","warning","good"].map(level => {
               const list = outlets.filter(o => getStatus(o, collections) === level); if (!list.length) return null;
@@ -450,32 +499,34 @@ export default function App() {
         )}
 
         {/* REPORTS */}
-        {tab === "Reports" && isOwner && <ReportsTab outlets={outlets} sales={sales} collections={collections} fmt={fmt} onExport={exportCSV} onExportPDF={() => exportPDF(outlets, collections, sales)} onBackup={() => { backupData(outlets, sales, collections, activityLog); showToast("Backup downloaded!"); }} getGrade={getGrade} getOutletTrend={getOutletTrend} />}
+        {tab === "Reports" && <ReportsTab outlets={outlets} sales={sales} collections={collections} fmt={fmt} onExport={exportCSV} onExportPDF={() => exportPDF(outlets, collections, sales)} onBackup={() => { backupData(outlets, sales, collections, activityLog); showToast("Backup downloaded!"); }} getGrade={getGrade} getOutletTrend={getOutletTrend} />}
 
         {/* ACTIVITY LOG */}
-        {tab === "Activity Log" && isOwner && (
+        {tab === "Activity Log" && (
           <div>
             <div style={{ fontSize: 12, color: "#4b5563", marginBottom: 12 }}>{activityLog.length} actions logged</div>
             {activityLog.length === 0 && <Empty icon="📝" text="No activity yet." />}
             {[...activityLog].sort((a, b) => new Date(b._updatedAt?.seconds * 1000 || 0) - new Date(a._updatedAt?.seconds * 1000 || 0)).map(l => (
               <div key={l.id} style={{ background: "#0d0d1f", borderRadius: 10, padding: "10px 14px", marginBottom: 6, border: "1px solid #1a1a35", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <div><div style={{ fontSize: 13, fontWeight: 600 }}>{l.action}</div><div style={{ fontSize: 11, color: "#4b5563", marginTop: 1 }}>{l.detail}</div></div>
-                <div style={{ textAlign: "right", flexShrink: 0, marginLeft: 8 }}><div style={{ fontSize: 11, color: l.role === "owner" ? "#a78bfa" : "#22c55e" }}>{l.role}</div><div style={{ fontSize: 10, color: "#4b5563" }}>{l.ts}</div></div>
+                <div style={{ fontSize: 10, color: "#4b5563", flexShrink: 0, marginLeft: 8 }}>{l.ts}</div>
               </div>
             ))}
           </div>
         )}
 
         {/* SETTINGS */}
-        {tab === "Settings" && isOwner && <SettingsTab pinsDoc={pinsDoc} targets={targets} savePins={savePins} saveTargets={saveTargets} showToast={showToast} />}
+        {tab === "Settings" && <SettingsTab pinsDoc={pinsDoc} targets={targets} savePins={savePins} saveTargets={saveTargets} showToast={showToast} />}
       </div>
 
       {/* MODALS */}
-      {modal === "outlet" && isOwner && <OutletModal outlet={editing} onClose={() => { setModal(null); setEditing(null); }} onSave={data => { editing ? updateOutlet(editing.id, data) : addOutlet(data); setModal(null); setEditing(null); }} />}
-      {modal === "sale" && <SaleModal outlets={outlets} preSelected={editing?.id} isStaff={isStaff} onClose={() => { setModal(null); setEditing(null); }} onSave={data => { addSale(data); setModal(null); setEditing(null); }} />}
-      {modal === "collection" && <CollectionModal outlets={outlets} preSelected={editing?.id} isStaff={isStaff} onClose={() => { setModal(null); setEditing(null); }} onSave={data => { addCollection(data); setModal(null); setEditing(null); }} />}
+      {modal === "outlet" && <OutletModal outlet={editing} onClose={() => { setModal(null); setEditing(null); }} onSave={data => { editing ? updateOutlet(editing.id, data) : addOutlet(data); setModal(null); setEditing(null); }} />}
+      {modal === "sale" && <SaleModal outlets={outlets} preSelected={editing?.id} onClose={() => { setModal(null); setEditing(null); }} onSave={data => { addSale(data); setModal(null); setEditing(null); }} />}
+      {modal === "editSale" && editSaleRecord && <SaleModal outlets={outlets} record={editSaleRecord} onClose={() => { setModal(null); setEditSaleRecord(null); }} onSave={data => { updateSale(editSaleRecord.id, data); setModal(null); setEditSaleRecord(null); }} />}
+      {modal === "collection" && <CollectionModal outlets={outlets} preSelected={editing?.id} onClose={() => { setModal(null); setEditing(null); }} onSave={data => { addCollection(data); setModal(null); setEditing(null); }} />}
+      {modal === "editCollection" && editCollectionRecord && <CollectionModal outlets={outlets} record={editCollectionRecord} onClose={() => { setModal(null); setEditCollectionRecord(null); }} onSave={data => { updateCollection(editCollectionRecord.id, data); setModal(null); setEditCollectionRecord(null); }} />}
       {modal === "target" && <TargetModal targets={targets} onClose={() => setModal(null)} onSave={t => { saveTargets(t); setModal(null); }} />}
-      {modal === "outletDetail" && editing && <OutletDetailModal outlet={editing} collections={collections} sales={sales} fmt={fmt} isOwner={isOwner} onClose={() => { setModal(null); setEditing(null); }} onCollect={() => setModal("collection")} onSale={() => setModal("sale")} onWhatsapp={() => whatsapp(editing)} grade={getGrade(editing, collections, sales)} trend={getOutletTrend(editing.id)} />}
+      {modal === "outletDetail" && editing && <OutletDetailModal outlet={editing} collections={collections} sales={sales} fmt={fmt} onClose={() => { setModal(null); setEditing(null); }} onCollect={() => setModal("collection")} onSale={() => setModal("sale")} onWhatsapp={() => whatsapp(editing)} grade={getGrade(editing, collections, sales)} trend={getOutletTrend(editing.id)} />}
     </div>
   );
 }
@@ -490,7 +541,7 @@ function ProgressBar({ label, current, target, fmt, color }) {
   </div>;
 }
 
-function OutletCard({ outlet, collections, fmt, isOwner, onEdit, onDelete, onCollect, onSale, onWhatsapp, onView, trend }) {
+function OutletCard({ outlet, collections, fmt, onEdit, onDelete, onCollect, onSale, onWhatsapp, onView, trend }) {
   const status = getStatus(outlet, collections); const m = STATUS_META[status];
   const cols = collections.filter(c => c.outletId === outlet.id);
   const totalCollected = cols.reduce((s, c) => s + c.amount, 0);
@@ -511,11 +562,11 @@ function OutletCard({ outlet, collections, fmt, isOwner, onEdit, onDelete, onCol
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 12 }}>
         <SmBtn color="#065f46" onClick={onCollect}>💰 Collect</SmBtn>
         <SmBtn color="#0369a1" onClick={onSale}>📦 Sale</SmBtn>
-        {isOwner && <SmBtn color="#1e1e35" onClick={onEdit}>✏️ Edit</SmBtn>}
+        <SmBtn color="#1e1e35" onClick={onEdit}>✏️ Edit</SmBtn>
         {outlet.contact && <SmBtn color="#1a3a2a" onClick={onWhatsapp}>💬 WA</SmBtn>}
         {outlet.mapsUrl && <SmBtn color="#1a2a3a" onClick={() => window.open(outlet.mapsUrl, "_blank")}>📍 Maps</SmBtn>}
         <SmBtn color="#1a1a2e" onClick={onView}>👁 Detail</SmBtn>
-        {isOwner && <SmBtn color="#3b0a0a" onClick={onDelete}>🗑</SmBtn>}
+        <SmBtn color="#3b0a0a" onClick={onDelete}>🗑</SmBtn>
       </div>
     </div>}
   </div>;
@@ -573,16 +624,14 @@ function ReportsTab({ outlets, sales, collections, fmt, onExport, onExportPDF, o
 
 function SettingsTab({ pinsDoc, targets, savePins, saveTargets, showToast }) {
   const [ownerPin, setOwnerPin] = useState(pinsDoc.owner);
-  const [staffPin, setStaffPin] = useState(pinsDoc.staff);
   const [ownerContact, setOwnerContact] = useState(targets.ownerContact || "");
   const [daily, setDaily] = useState(targets.daily || "");
   const [monthly, setMonthly] = useState(targets.monthly || "");
   return <div>
     <div style={{ background: "#0d0d1f", borderRadius: 12, padding: 16, marginBottom: 14, border: "1px solid #1a1a35" }}>
-      <div style={{ fontWeight: 700, fontSize: 13, color: "#a78bfa", marginBottom: 14 }}>🔐 Change PINs</div>
-      <FInput label="Owner PIN" value={ownerPin} onChange={setOwnerPin} placeholder="Min 4 digits" type="password" />
-      <FInput label="Staff PIN" value={staffPin} onChange={setStaffPin} placeholder="Min 4 digits" type="password" />
-      <Btn color="#7c3aed" onClick={() => { if (ownerPin.length >= 4 && staffPin.length >= 4) { savePins({ owner: ownerPin, staff: staffPin }); } else showToast("Min 4 digits", "error"); }} style={{ width: "100%", padding: 11, fontSize: 14, marginTop: 4 }}>Save PINs</Btn>
+      <div style={{ fontWeight: 700, fontSize: 13, color: "#a78bfa", marginBottom: 14 }}>🔐 Change PIN</div>
+      <FInput label="PIN" value={ownerPin} onChange={setOwnerPin} placeholder="Min 4 digits" type="password" />
+      <Btn color="#7c3aed" onClick={() => { if (ownerPin.length >= 4) { savePins({ owner: ownerPin }); } else showToast("Min 4 digits", "error"); }} style={{ width: "100%", padding: 11, fontSize: 14, marginTop: 4 }}>Save PIN</Btn>
     </div>
     <div style={{ background: "#0d0d1f", borderRadius: 12, padding: 16, marginBottom: 14, border: "1px solid #1a1a35" }}>
       <div style={{ fontWeight: 700, fontSize: 13, color: "#a78bfa", marginBottom: 14 }}>🎯 Collection Targets</div>
@@ -624,28 +673,43 @@ function OutletModal({ outlet, onClose, onSave }) {
   </BottomModal>;
 }
 
-function SaleModal({ outlets, preSelected, isStaff, onClose, onSave }) {
-  const [f, setF] = useState({ outletId: preSelected || "", amount: "", date: todayStr(), items: "", deliveryStatus: "delivered" });
+// Handles both creating a new sale and editing an existing one.
+// When `record` is passed, the form is pre-filled and the amount (and any other field) can be edited.
+function SaleModal({ outlets, preSelected, record, onClose, onSave }) {
+  const [f, setF] = useState({
+    outletId: record?.outletId || preSelected || "",
+    amount: record?.amount ?? "",
+    date: record?.date || todayStr(),
+    items: record?.items || "",
+    deliveryStatus: record?.deliveryStatus || "delivered"
+  });
   const set = k => v => setF(p => ({ ...p, [k]: v }));
-  return <BottomModal title="Record New Sale" onClose={onClose}>
+  return <BottomModal title={record ? "Edit Sale" : "Record New Sale"} onClose={onClose}>
     <FSelect label="Outlet *" value={f.outletId} onChange={set("outletId")} options={outlets.map(o => ({ v: o.id, l: o.name }))} />
     <FInput label="Amount (₹) *" value={f.amount} onChange={set("amount")} placeholder="0" type="number" />
     <FInput label="Items / Description" value={f.items} onChange={set("items")} placeholder="e.g. 50 glass sets, 20 plates" />
-    {!isStaff && <FInput label="Date" value={f.date} onChange={set("date")} type="date" />}
+    <FInput label="Date" value={f.date} onChange={set("date")} type="date" />
     <div style={{ marginBottom: 12 }}>
       <label style={{ fontSize: 11, color: "#6b7280", display: "block", marginBottom: 4, textTransform: "uppercase", letterSpacing: .5 }}>Delivery Status</label>
       <div style={{ display: "flex", gap: 8 }}>
         {["delivered","pending"].map(s => <button key={s} onClick={() => set("deliveryStatus")(s)} style={{ flex: 1, background: f.deliveryStatus === s ? "#0369a1" : "#080810", border: `1px solid ${f.deliveryStatus === s ? "#0369a1" : "#1a1a35"}`, color: f.deliveryStatus === s ? "#fff" : "#6b7280", borderRadius: 8, padding: "9px", fontSize: 13, cursor: "pointer" }}>{s === "delivered" ? "✅ Delivered" : "🕐 Pending"}</button>)}
       </div>
     </div>
-    <Btn color="#0369a1" onClick={() => f.outletId && f.amount && onSave({ ...f, amount: parseFloat(f.amount) })} style={{ width: "100%", padding: 12, fontSize: 14, marginTop: 4 }}>Save Sale</Btn>
+    <Btn color="#0369a1" onClick={() => f.outletId && f.amount && onSave({ ...f, amount: parseFloat(f.amount) })} style={{ width: "100%", padding: 12, fontSize: 14, marginTop: 4 }}>{record ? "Update Sale" : "Save Sale"}</Btn>
   </BottomModal>;
 }
 
-function CollectionModal({ outlets, preSelected, isStaff, onClose, onSave }) {
-  const [f, setF] = useState({ outletId: preSelected || "", amount: "", date: todayStr(), note: "", payMethod: "Cash" });
+// Handles both creating a new collection and editing an existing one.
+function CollectionModal({ outlets, preSelected, record, onClose, onSave }) {
+  const [f, setF] = useState({
+    outletId: record?.outletId || preSelected || "",
+    amount: record?.amount ?? "",
+    date: record?.date || todayStr(),
+    note: record?.note || "",
+    payMethod: record?.payMethod || "Cash"
+  });
   const set = k => v => setF(p => ({ ...p, [k]: v }));
-  return <BottomModal title="Record Collection" onClose={onClose}>
+  return <BottomModal title={record ? "Edit Collection" : "Record Collection"} onClose={onClose}>
     <FSelect label="Outlet *" value={f.outletId} onChange={set("outletId")} options={outlets.map(o => ({ v: o.id, l: `${o.name}${o.totalDue > 0 ? ` (Due: ₹${Math.round(o.totalDue)})` : ""}` }))} />
     <FInput label="Amount (₹) *" value={f.amount} onChange={set("amount")} placeholder="0" type="number" />
     <div style={{ marginBottom: 12 }}>
@@ -654,9 +718,9 @@ function CollectionModal({ outlets, preSelected, isStaff, onClose, onSave }) {
         {["Cash","Bank Transfer","GPay"].map(m => <button key={m} onClick={() => set("payMethod")(m)} style={{ background: f.payMethod === m ? "#065f46" : "#080810", border: `1px solid ${f.payMethod === m ? "#065f46" : "#1a1a35"}`, color: f.payMethod === m ? "#fff" : "#6b7280", borderRadius: 8, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>{m}</button>)}
       </div>
     </div>
-    {!isStaff && <FInput label="Date" value={f.date} onChange={set("date")} type="date" />}
+    <FInput label="Date" value={f.date} onChange={set("date")} type="date" />
     <FInput label="Note (optional)" value={f.note} onChange={set("note")} placeholder="e.g. Partial payment" />
-    <Btn color="#065f46" onClick={() => f.outletId && f.amount && onSave({ ...f, amount: parseFloat(f.amount) })} style={{ width: "100%", padding: 12, fontSize: 14, marginTop: 4 }}>Save Collection</Btn>
+    <Btn color="#065f46" onClick={() => f.outletId && f.amount && onSave({ ...f, amount: parseFloat(f.amount) })} style={{ width: "100%", padding: 12, fontSize: 14, marginTop: 4 }}>{record ? "Update Collection" : "Save Collection"}</Btn>
   </BottomModal>;
 }
 
@@ -669,7 +733,7 @@ function TargetModal({ targets, onClose, onSave }) {
   </BottomModal>;
 }
 
-function OutletDetailModal({ outlet, collections, sales, fmt, isOwner, onClose, onCollect, onSale, onWhatsapp, grade, trend }) {
+function OutletDetailModal({ outlet, collections, sales, fmt, onClose, onCollect, onSale, onWhatsapp, grade, trend }) {
   const cols = [...collections].filter(c => c.outletId === outlet.id).sort((a, b) => new Date(b.date) - new Date(a.date));
   const sals = [...sales].filter(s => s.outletId === outlet.id);
   return <BottomModal title={outlet.name} onClose={onClose}>
@@ -707,4 +771,3 @@ function FInput({ label, value, onChange, placeholder, type = "text" }) { return
 function FSelect({ label, value, onChange, options }) { return <div style={{ marginBottom: 12 }}><label style={{ fontSize: 11, color: "#6b7280", display: "block", marginBottom: 4, textTransform: "uppercase", letterSpacing: .5 }}>{label}</label><select value={value} onChange={e => onChange(e.target.value)} style={{ width: "100%", background: "#080810", border: "1px solid #1a1a35", color: "#e2e0f0", borderRadius: 8, padding: "10px 12px", fontSize: 14, boxSizing: "border-box" }}><option value="">-- Select --</option>{options.map(o => <option key={o.v} value={o.v}>{o.l}</option>)}</select></div>; }
 function Empty({ icon, text }) { return <div style={{ textAlign: "center", padding: "40px 20px", color: "#4b5563" }}><div style={{ fontSize: 40 }}>{icon}</div><div style={{ marginTop: 8, fontSize: 14 }}>{text}</div></div>; }
 const inputSt = { background: "#0d0d1f", border: "1px solid #1a1a35", color: "#e2e0f0", borderRadius: 8, padding: "9px 12px", fontSize: 13, outline: "none", width: "100%", boxSizing: "border-box" };
-// test
