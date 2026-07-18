@@ -1,13 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import { db } from "./firebase";
-
 import {
-  collection,
-  doc,
-  setDoc,
-  deleteDoc,
-  onSnapshot,
-  serverTimestamp
+  collection, doc, setDoc, deleteDoc, onSnapshot, serverTimestamp
 } from "firebase/firestore";
 
 // ── Firestore helpers ─────────────────────────────────────────────────────────
@@ -18,6 +12,8 @@ const Col = {
   targets: "targets",
   activityLog: "activityLog",
   pins: "pins",
+  products: "products",           // NEW
+  stockMovements: "stockMovements", // NEW
 };
 
 const saveDoc = async (colName, id, data) => {
@@ -170,24 +166,30 @@ function LoginScreen({ pins, onLogin }) {
 
 // ── APP ───────────────────────────────────────────────────────────────────────
 export default function App() {
-  const [outlets, outletsLoaded]       = useCollection(Col.outlets);
-  const [sales, salesLoaded]           = useCollection(Col.sales);
-  const [collections, colsLoaded]      = useCollection(Col.collections);
-  const [activityLog, logLoaded]       = useCollection(Col.activityLog);
-  const [targets, targetsLoaded]       = useSingleDoc(Col.targets, "config", { daily: 0, monthly: 0, ownerContact: "" });
-  const [pinsDoc, pinsLoaded]          = useSingleDoc(Col.pins, "config", { owner: "1234" });
+  const [outlets, outletsLoaded]               = useCollection(Col.outlets);
+  const [sales, salesLoaded]                   = useCollection(Col.sales);
+  const [collections, colsLoaded]              = useCollection(Col.collections);
+  const [activityLog, logLoaded]               = useCollection(Col.activityLog);
+  const [targets, targetsLoaded]               = useSingleDoc(Col.targets, "config", { daily: 0, monthly: 0, ownerContact: "" });
+  const [pinsDoc, pinsLoaded]                  = useSingleDoc(Col.pins, "config", { owner: "1234" });
+  const [products, productsLoaded]             = useCollection(Col.products);
+  const [stockMovements, stockMovementsLoaded] = useCollection(Col.stockMovements);
 
-  const loaded = outletsLoaded && salesLoaded && colsLoaded && logLoaded && targetsLoaded && pinsLoaded;
+  const loaded = outletsLoaded && salesLoaded && colsLoaded && logLoaded && targetsLoaded && pinsLoaded && productsLoaded && stockMovementsLoaded;
 
-  const [loggedIn, setLoggedIn] = useState(false);
-  const [tab, setTab]         = useState("Dashboard");
-  const [search, setSearch]   = useState("");
-  const [areaFilter, setAreaFilter] = useState("All");
-  const [modal, setModal]     = useState(null);
-  const [editing, setEditing] = useState(null);
-  const [editSaleRecord, setEditSaleRecord] = useState(null);
+  const [loggedIn, setLoggedIn]                     = useState(false);
+  const [tab, setTab]                               = useState("Dashboard");
+  const [search, setSearch]                         = useState("");
+  const [areaFilter, setAreaFilter]                 = useState("All");
+  const [modal, setModal]                           = useState(null);
+  const [editing, setEditing]                       = useState(null);
+  const [editSaleRecord, setEditSaleRecord]         = useState(null);
   const [editCollectionRecord, setEditCollectionRecord] = useState(null);
-  const [toast, setToast]     = useState(null);
+  const [toast, setToast]                           = useState(null);
+  // NEW inventory states
+  const [editingProduct, setEditingProduct]         = useState(null);
+  const [stockMoveProduct, setStockMoveProduct]     = useState(null);
+  const [stockMoveType, setStockMoveType]           = useState("in");
 
   const showToast = (msg, type = "success") => { setToast({ msg, type }); setTimeout(() => setToast(null), 2500); };
 
@@ -196,41 +198,31 @@ export default function App() {
     await saveDoc(Col.activityLog, id, { id, action, detail, ts: nowTs(), date: todayStr() });
   };
 
-  // Outlet helpers
+  // ── Outlet helpers ────────────────────────────────────────────────────────
   const addOutlet = async (data) => {
     const id = uid();
     await saveDoc(Col.outlets, id, { id, createdAt: new Date().toISOString(), totalDue: 0, ...data });
-    await log("Add Outlet", data.name);
-    showToast("Outlet added!");
+    await log("Add Outlet", data.name); showToast("Outlet added!");
   };
   const updateOutlet = async (id, data) => {
     await saveDoc(Col.outlets, id, { ...outlets.find(o => o.id === id), ...data });
-    await log("Edit Outlet", data.name);
-    showToast("Updated!");
+    await log("Edit Outlet", data.name); showToast("Updated!");
   };
   const deleteOutlet = async (outlet) => {
     await delDoc(Col.outlets, outlet.id);
-    // remove associated sales and collections
     sales.filter(s => s.outletId === outlet.id).forEach(s => delDoc(Col.sales, s.id));
     collections.filter(c => c.outletId === outlet.id).forEach(c => delDoc(Col.collections, c.id));
-    await log("Delete Outlet", outlet.name);
-    showToast("Deleted!");
+    await log("Delete Outlet", outlet.name); showToast("Deleted!");
   };
-
   const addSale = async (data) => {
     const id = uid();
     await saveDoc(Col.sales, id, { id, ...data });
     const outlet = outlets.find(o => o.id === data.outletId);
     await saveDoc(Col.outlets, data.outletId, { ...outlet, totalDue: (outlet.totalDue || 0) + data.amount });
-    await log("Sale", `${outlet?.name} — ${fmt(data.amount)}`);
-    showToast("Sale recorded!");
+    await log("Sale", `${outlet?.name} — ${fmt(data.amount)}`); showToast("Sale recorded!");
   };
-
-  // Editing a sale re-applies the amount difference to the outlet's due,
-  // and correctly moves the due amount across outlets if the outlet was changed.
   const updateSale = async (id, data) => {
-    const oldSale = sales.find(s => s.id === id);
-    if (!oldSale) return;
+    const oldSale = sales.find(s => s.id === id); if (!oldSale) return;
     if (oldSale.outletId !== data.outletId) {
       const oldOutlet = outlets.find(o => o.id === oldSale.outletId);
       if (oldOutlet) await saveDoc(Col.outlets, oldOutlet.id, { ...oldOutlet, totalDue: Math.max(0, (oldOutlet.totalDue || 0) - oldSale.amount) });
@@ -242,33 +234,24 @@ export default function App() {
     }
     await saveDoc(Col.sales, id, { ...oldSale, ...data });
     const outlet2 = outlets.find(o => o.id === data.outletId);
-    await log("Edit Sale", `${outlet2?.name || ""} — ${fmt(data.amount)}`);
-    showToast("Sale updated!");
+    await log("Edit Sale", `${outlet2?.name || ""} — ${fmt(data.amount)}`); showToast("Sale updated!");
   };
-
   const deleteSale = async (s) => {
     if (!window.confirm(`Delete this sale of ${fmt(s.amount)}?`)) return;
     const outlet = outlets.find(o => o.id === s.outletId);
     if (outlet) await saveDoc(Col.outlets, outlet.id, { ...outlet, totalDue: Math.max(0, (outlet.totalDue || 0) - s.amount) });
     await delDoc(Col.sales, s.id);
-    await log("Delete Sale", `${outlet?.name || ""} — ${fmt(s.amount)}`);
-    showToast("Sale deleted!");
+    await log("Delete Sale", `${outlet?.name || ""} — ${fmt(s.amount)}`); showToast("Sale deleted!");
   };
-
   const addCollection = async (data) => {
     const id = uid();
     await saveDoc(Col.collections, id, { id, ...data });
     const outlet = outlets.find(o => o.id === data.outletId);
     await saveDoc(Col.outlets, data.outletId, { ...outlet, totalDue: Math.max(0, (outlet.totalDue || 0) - data.amount) });
-    await log("Collection", `${outlet?.name} — ${fmt(data.amount)}`);
-    showToast("Collection saved!");
+    await log("Collection", `${outlet?.name} — ${fmt(data.amount)}`); showToast("Collection saved!");
   };
-
-  // Editing a collection reverses the old amount's effect and applies the new one,
-  // moving the due across outlets if the outlet was changed.
   const updateCollection = async (id, data) => {
-    const oldCol = collections.find(c => c.id === id);
-    if (!oldCol) return;
+    const oldCol = collections.find(c => c.id === id); if (!oldCol) return;
     if (oldCol.outletId !== data.outletId) {
       const oldOutlet = outlets.find(o => o.id === oldCol.outletId);
       if (oldOutlet) await saveDoc(Col.outlets, oldOutlet.id, { ...oldOutlet, totalDue: (oldOutlet.totalDue || 0) + oldCol.amount });
@@ -280,22 +263,68 @@ export default function App() {
     }
     await saveDoc(Col.collections, id, { ...oldCol, ...data });
     const outlet2 = outlets.find(o => o.id === data.outletId);
-    await log("Edit Collection", `${outlet2?.name || ""} — ${fmt(data.amount)}`);
-    showToast("Collection updated!");
+    await log("Edit Collection", `${outlet2?.name || ""} — ${fmt(data.amount)}`); showToast("Collection updated!");
   };
-
   const deleteCollection = async (c) => {
     if (!window.confirm(`Delete this collection of ${fmt(c.amount)}?`)) return;
     const outlet = outlets.find(o => o.id === c.outletId);
     if (outlet) await saveDoc(Col.outlets, outlet.id, { ...outlet, totalDue: (outlet.totalDue || 0) + c.amount });
     await delDoc(Col.collections, c.id);
-    await log("Delete Collection", `${outlet?.name || ""} — ${fmt(c.amount)}`);
-    showToast("Collection deleted!");
+    await log("Delete Collection", `${outlet?.name || ""} — ${fmt(c.amount)}`); showToast("Collection deleted!");
   };
-
   const saveTargets = async (t) => { await saveDoc(Col.targets, "config", t); showToast("Targets saved!"); };
   const savePins = async (p) => { await saveDoc(Col.pins, "config", p); await log("Settings", "PIN updated"); showToast("PIN saved!"); };
 
+  // ── NEW: Product & Inventory helpers ──────────────────────────────────────
+  const addProduct = async (data) => {
+    const id = uid();
+    await saveDoc(Col.products, id, { id, createdAt: new Date().toISOString(), ...data });
+    if (data.stock > 0) {
+      const movId = uid();
+      await saveDoc(Col.stockMovements, movId, { id: movId, productId: id, type: "in", quantity: data.stock, note: "Opening stock", date: todayStr() });
+    }
+    await log("Add Product", data.name); showToast("Product added!");
+  };
+  const updateProduct = async (id, data) => {
+    const existing = products.find(p => p.id === id);
+    await saveDoc(Col.products, id, { ...existing, ...data });
+    await log("Edit Product", data.name); showToast("Updated!");
+  };
+  const deleteProduct = async (product) => {
+    if (!window.confirm(`Delete "${product.name}"? This will also remove all stock records.`)) return;
+    await delDoc(Col.products, product.id);
+    stockMovements.filter(m => m.productId === product.id).forEach(m => delDoc(Col.stockMovements, m.id));
+    await log("Delete Product", product.name); showToast("Product deleted!");
+  };
+  const addStockMovement = async (data) => {
+    const id = uid();
+    await saveDoc(Col.stockMovements, id, { id, ...data });
+    const product = products.find(p => p.id === data.productId);
+    if (product) {
+      const newStock = data.type === "in"
+        ? (product.stock || 0) + data.quantity
+        : Math.max(0, (product.stock || 0) - data.quantity);
+      await saveDoc(Col.products, data.productId, { ...product, stock: newStock });
+    }
+    await log(`Stock ${data.type}`, `${product?.name} — ${data.quantity} ${product?.unit || "units"}`);
+    showToast(data.type === "in" ? "📥 Stock added!" : "📤 Stock removed!");
+  };
+  const sendLowStockAlert = () => {
+    const items = products.filter(p => p.minThreshold > 0 && (p.stock || 0) <= p.minThreshold);
+    if (items.length === 0) { showToast("✅ All products well stocked!"); return; }
+    const lines = [
+      `📦 *AL LAMIA — Low Stock Alert*`,
+      `📅 ${new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}`,
+      ``,
+      `⚠️ Items Needing Restock (${items.length}):`,
+      ...items.map(p => `• ${p.name}: ${p.stock || 0} ${p.unit || "units"} left (min: ${p.minThreshold})`),
+      ``,
+      `_Sent from TradeTrack Pro — AL LAMIA ENTERPRISES_`
+    ];
+    window.open(`https://wa.me/${targets.ownerContact?.replace(/\D/g, "")}?text=${encodeURIComponent(lines.join("\n"))}`, "_blank");
+  };
+
+  // ── Computed values ────────────────────────────────────────────────────────
   const areas = useMemo(() => ["All", ...new Set(outlets.map(o => o.area).filter(Boolean))], [outlets]);
   const filteredOutlets = useMemo(() => {
     let list = outlets;
@@ -313,6 +342,20 @@ export default function App() {
     const bT = collections.filter(c => c.outletId === b.id).reduce((s, c) => s + c.amount, 0);
     return bT - aT;
   }).slice(0, 5), [outlets, collections]);
+
+  // NEW computed
+  const lowStockItems = useMemo(() =>
+    products.filter(p => p.minThreshold > 0 && (p.stock || 0) <= p.minThreshold),
+    [products]
+  );
+  const productAnalytics = useMemo(() =>
+    products.map(p => {
+      const totalOut = stockMovements.filter(m => m.productId === p.id && m.type === "out").reduce((s, m) => s + m.quantity, 0);
+      const totalIn  = stockMovements.filter(m => m.productId === p.id && m.type === "in").reduce((s, m) => s + m.quantity, 0);
+      return { ...p, totalOut, totalIn };
+    }).sort((a, b) => b.totalOut - a.totalOut),
+    [products, stockMovements]
+  );
 
   const getOutletTrend = (outletId) => {
     const months = [];
@@ -341,7 +384,7 @@ export default function App() {
 
   if (!loggedIn) return <LoginScreen pins={pinsDoc} onLogin={() => { setLoggedIn(true); log("Login", "Logged in"); setTab("Dashboard"); }} />;
 
-  const TABS = ["Dashboard","Outlets","Sales","Collections","Dues & Alerts","Reports","Activity Log","Settings"];
+  const TABS = ["Dashboard","Outlets","Sales","Collections","Dues & Alerts","Inventory","Reports","Activity Log","Settings"];
 
   return (
     <div style={{ minHeight: "100vh", background: "#080810", color: "#e2e0f0", fontFamily: "'Sora',sans-serif", paddingBottom: 80 }}>
@@ -367,7 +410,14 @@ export default function App() {
       {/* Tabs */}
       <div style={{ background: "#0d0d1f", borderBottom: "1px solid #1a1a35", overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
         <div style={{ display: "flex", maxWidth: 860, margin: "0 auto", padding: "0 16px", minWidth: "max-content" }}>
-          {TABS.map(t => <button key={t} onClick={() => setTab(t)} style={{ background: "none", border: "none", color: tab === t ? "#a78bfa" : "#4b5563", borderBottom: tab === t ? "2px solid #7c3aed" : "2px solid transparent", padding: "11px 13px", cursor: "pointer", fontSize: 12, fontWeight: tab === t ? 700 : 400, whiteSpace: "nowrap" }}>{t}</button>)}
+          {TABS.map(t => (
+            <button key={t} onClick={() => setTab(t)} style={{ background: "none", border: "none", color: tab === t ? "#a78bfa" : "#4b5563", borderBottom: tab === t ? "2px solid #7c3aed" : "2px solid transparent", padding: "11px 13px", cursor: "pointer", fontSize: 12, fontWeight: tab === t ? 700 : 400, whiteSpace: "nowrap", position: "relative" }}>
+              {t}
+              {t === "Inventory" && lowStockItems.length > 0 && (
+                <span style={{ background: "#ef4444", color: "#fff", borderRadius: 10, padding: "1px 5px", fontSize: 9, marginLeft: 4, fontWeight: 700 }}>{lowStockItems.length}</span>
+              )}
+            </button>
+          ))}
         </div>
       </div>
 
@@ -386,6 +436,23 @@ export default function App() {
               ))}
             </div>
 
+            {/* NEW: Low stock alert on dashboard */}
+            {lowStockItems.length > 0 && (
+              <div style={{ background: "#1f0a0a", borderRadius: 12, padding: 14, marginBottom: 14, border: "1px solid #7f1d1d" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                  <span style={{ fontWeight: 700, fontSize: 13, color: "#ef4444" }}>📦 Low Stock Alert ({lowStockItems.length})</span>
+                  <button onClick={sendLowStockAlert} style={{ background: "#3b0a0a", border: "1px solid #7f1d1d", color: "#ef4444", borderRadius: 6, padding: "4px 10px", fontSize: 11, cursor: "pointer" }}>📤 WhatsApp</button>
+                </div>
+                {lowStockItems.slice(0, 3).map(p => (
+                  <div key={p.id} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: "1px solid #2a0a0a", fontSize: 13 }}>
+                    <span style={{ color: "#e2e0f0" }}>{p.name}</span>
+                    <span style={{ color: "#ef4444", fontWeight: 700 }}>{p.stock || 0} {p.unit || "units"} left</span>
+                  </div>
+                ))}
+                {lowStockItems.length > 3 && <div style={{ fontSize: 11, color: "#6b7280", marginTop: 8 }}>+{lowStockItems.length - 3} more — check Inventory tab</div>}
+              </div>
+            )}
+
             <div style={{ background: "#0d0d1f", borderRadius: 12, padding: 14, marginBottom: 14, border: "1px solid #1a1a35" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
                 <span style={{ fontWeight: 700, fontSize: 13, color: "#a78bfa" }}>🎯 Collection Targets</span>
@@ -394,6 +461,7 @@ export default function App() {
               <ProgressBar label="Today" current={todayCollected} target={targets.daily} fmt={fmt} color="#22c55e" />
               <ProgressBar label="This Month" current={monthCollected} target={targets.monthly} fmt={fmt} color="#60a5fa" />
             </div>
+
             <div style={{ background: "#0d0d1f", borderRadius: 12, padding: 14, marginBottom: 14, border: "1px solid #1a1a35" }}>
               <div style={{ fontWeight: 700, fontSize: 13, color: "#a78bfa", marginBottom: 12 }}>🏆 Top Outlets</div>
               {topOutlets.length === 0 && <div style={{ color: "#4b5563", fontSize: 13 }}>No data yet.</div>}
@@ -407,6 +475,7 @@ export default function App() {
                 </div>;
               })}
             </div>
+
             <div style={{ background: "#0d0d1f", borderRadius: 12, padding: 14, border: "1px solid #1a1a35" }}>
               <div style={{ fontWeight: 700, fontSize: 13, color: "#a78bfa", marginBottom: 8 }}>💬 Daily WhatsApp Summary</div>
               <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 10 }}>Send today's report to owner's WhatsApp in one tap.</div>
@@ -498,6 +567,22 @@ export default function App() {
           </div>
         )}
 
+        {/* INVENTORY — NEW TAB */}
+        {tab === "Inventory" && (
+          <InventoryTab
+            products={products}
+            stockMovements={stockMovements}
+            productAnalytics={productAnalytics}
+            lowStockItems={lowStockItems}
+            onAddProduct={() => { setEditingProduct(null); setModal("product"); }}
+            onEditProduct={(p) => { setEditingProduct(p); setModal("product"); }}
+            onDeleteProduct={deleteProduct}
+            onStockIn={(p) => { setStockMoveProduct(p); setStockMoveType("in"); setModal("stockMove"); }}
+            onStockOut={(p) => { setStockMoveProduct(p); setStockMoveType("out"); setModal("stockMove"); }}
+            sendLowStockAlert={sendLowStockAlert}
+          />
+        )}
+
         {/* REPORTS */}
         {tab === "Reports" && <ReportsTab outlets={outlets} sales={sales} collections={collections} fmt={fmt} onExport={exportCSV} onExportPDF={() => exportPDF(outlets, collections, sales)} onBackup={() => { backupData(outlets, sales, collections, activityLog); showToast("Backup downloaded!"); }} getGrade={getGrade} getOutletTrend={getOutletTrend} />}
 
@@ -519,7 +604,7 @@ export default function App() {
         {tab === "Settings" && <SettingsTab pinsDoc={pinsDoc} targets={targets} savePins={savePins} saveTargets={saveTargets} showToast={showToast} />}
       </div>
 
-      {/* MODALS */}
+      {/* MODALS — existing */}
       {modal === "outlet" && <OutletModal outlet={editing} onClose={() => { setModal(null); setEditing(null); }} onSave={data => { editing ? updateOutlet(editing.id, data) : addOutlet(data); setModal(null); setEditing(null); }} />}
       {modal === "sale" && <SaleModal outlets={outlets} preSelected={editing?.id} onClose={() => { setModal(null); setEditing(null); }} onSave={data => { addSale(data); setModal(null); setEditing(null); }} />}
       {modal === "editSale" && editSaleRecord && <SaleModal outlets={outlets} record={editSaleRecord} onClose={() => { setModal(null); setEditSaleRecord(null); }} onSave={data => { updateSale(editSaleRecord.id, data); setModal(null); setEditSaleRecord(null); }} />}
@@ -527,11 +612,238 @@ export default function App() {
       {modal === "editCollection" && editCollectionRecord && <CollectionModal outlets={outlets} record={editCollectionRecord} onClose={() => { setModal(null); setEditCollectionRecord(null); }} onSave={data => { updateCollection(editCollectionRecord.id, data); setModal(null); setEditCollectionRecord(null); }} />}
       {modal === "target" && <TargetModal targets={targets} onClose={() => setModal(null)} onSave={t => { saveTargets(t); setModal(null); }} />}
       {modal === "outletDetail" && editing && <OutletDetailModal outlet={editing} collections={collections} sales={sales} fmt={fmt} onClose={() => { setModal(null); setEditing(null); }} onCollect={() => setModal("collection")} onSale={() => setModal("sale")} onWhatsapp={() => whatsapp(editing)} grade={getGrade(editing, collections, sales)} trend={getOutletTrend(editing.id)} />}
+      {/* MODALS — new inventory */}
+      {modal === "product" && <ProductModal product={editingProduct} onClose={() => { setModal(null); setEditingProduct(null); }} onSave={data => { editingProduct ? updateProduct(editingProduct.id, data) : addProduct(data); setModal(null); setEditingProduct(null); }} />}
+      {modal === "stockMove" && <StockMoveModal product={stockMoveProduct} type={stockMoveType} products={products} onClose={() => { setModal(null); setStockMoveProduct(null); }} onSave={data => { addStockMovement(data); setModal(null); setStockMoveProduct(null); }} />}
     </div>
   );
 }
 
-// ── Sub-components ────────────────────────────────────────────────────────────
+// ── NEW: Inventory Tab ────────────────────────────────────────────────────────
+function InventoryTab({ products, stockMovements, productAnalytics, lowStockItems, onAddProduct, onEditProduct, onDeleteProduct, onStockIn, onStockOut, sendLowStockAlert }) {
+  const [view, setView] = useState("products");
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 14, overflowX: "auto" }}>
+        {[["products","📦 Products"], ["analytics","📊 Analytics"], ["lowstock",`⚠️ Low Stock${lowStockItems.length > 0 ? ` (${lowStockItems.length})` : ""}`]].map(([v, label]) => (
+          <button key={v} onClick={() => setView(v)} style={{ background: view === v ? "#7c3aed" : "#1a1a2e", border: "none", color: view === v ? "#fff" : "#6b7280", borderRadius: 20, padding: "6px 14px", fontSize: 12, cursor: "pointer", whiteSpace: "nowrap" }}>{label}</button>
+        ))}
+      </div>
+
+      {view === "products" && (
+        <div>
+          <button onClick={onAddProduct} style={{ background: "#7c3aed", border: "none", color: "#fff", borderRadius: 8, padding: "10px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer", width: "100%", marginBottom: 12 }}>+ Add Product</button>
+          <div style={{ fontSize: 12, color: "#4b5563", marginBottom: 10 }}>{products.length} products · synced live ☁️</div>
+          {products.length === 0 && <Empty icon="📦" text="No products yet. Add your first product to start tracking inventory." />}
+          {products.map(p => <ProductCard key={p.id} product={p} stockMovements={stockMovements} onEdit={() => onEditProduct(p)} onDelete={() => onDeleteProduct(p)} onStockIn={() => onStockIn(p)} onStockOut={() => onStockOut(p)} />)}
+        </div>
+      )}
+
+      {view === "analytics" && (
+        <div>
+          <div style={{ background: "#0d0d1f", borderRadius: 12, padding: 14, border: "1px solid #1a1a35", marginBottom: 14 }}>
+            <div style={{ fontWeight: 700, fontSize: 13, color: "#22c55e", marginBottom: 12 }}>🏆 Best Selling Products</div>
+            {productAnalytics.length === 0 && <div style={{ color: "#4b5563", fontSize: 13 }}>No data yet — record stock out movements to see analytics.</div>}
+            {productAnalytics.slice(0, 5).map((p, i) => (
+              <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: "1px solid #111120" }}>
+                <div style={{ width: 26, height: 26, borderRadius: "50%", background: i === 0 ? "#f59e0b" : i === 1 ? "#9ca3af" : i === 2 ? "#b45309" : "#1a1a2e", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700, color: i < 3 ? "#000" : "#6b7280", flexShrink: 0 }}>{i + 1}</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
+                  <div style={{ fontSize: 11, color: "#4b5563" }}>{p.category || "Uncategorized"}</div>
+                </div>
+                <div style={{ textAlign: "right", flexShrink: 0 }}>
+                  <div style={{ fontSize: 13, color: "#22c55e", fontWeight: 600 }}>{p.totalOut} {p.unit || "units"} out</div>
+                  <div style={{ fontSize: 11, color: "#4b5563" }}>{p.stock || 0} in stock</div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ background: "#0d0d1f", borderRadius: 12, padding: 14, border: "1px solid #1a1a35", marginBottom: 14 }}>
+            <div style={{ fontWeight: 700, fontSize: 13, color: "#f59e0b", marginBottom: 12 }}>📉 Slow Moving Products</div>
+            {productAnalytics.length === 0 && <div style={{ color: "#4b5563", fontSize: 13 }}>No data yet.</div>}
+            {[...productAnalytics].reverse().slice(0, 5).map(p => (
+              <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: "1px solid #111120" }}>
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 600 }}>{p.name}</div>
+                  <div style={{ fontSize: 11, color: "#4b5563" }}>{p.category || "Uncategorized"}</div>
+                </div>
+                <div style={{ textAlign: "right" }}>
+                  <div style={{ fontSize: 13, color: "#f59e0b", fontWeight: 600 }}>{p.totalOut} {p.unit || "units"} out</div>
+                  <div style={{ fontSize: 11, color: "#4b5563" }}>{p.stock || 0} in stock</div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ background: "#0d0d1f", borderRadius: 12, padding: 14, border: "1px solid #1a1a35" }}>
+            <div style={{ fontWeight: 700, fontSize: 13, color: "#a78bfa", marginBottom: 12 }}>📋 Inventory Summary</div>
+            {[
+              { label: "Total Products", value: productAnalytics.length, color: "#a78bfa" },
+              { label: "Total Stock Value", value: "₹ " + new Intl.NumberFormat("en-IN").format(productAnalytics.reduce((s, p) => s + ((p.stock || 0) * (p.price || 0)), 0)), color: "#22c55e" },
+              { label: "Low Stock Items", value: productAnalytics.filter(p => p.minThreshold > 0 && (p.stock || 0) <= p.minThreshold).length, color: "#ef4444" },
+              { label: "Out of Stock", value: productAnalytics.filter(p => (p.stock || 0) === 0).length, color: "#f59e0b" },
+            ].map(r => (
+              <div key={r.label} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: "1px solid #111120", fontSize: 13 }}>
+                <span style={{ color: "#6b7280" }}>{r.label}</span>
+                <span style={{ fontWeight: 700, color: r.color }}>{r.value}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {view === "lowstock" && (
+        <div>
+          <button onClick={sendLowStockAlert} style={{ background: "#1a3a2a", border: "1px solid #14532d", color: "#4ade80", borderRadius: 8, padding: "10px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer", width: "100%", marginBottom: 12 }}>📤 Send Restock Alert via WhatsApp</button>
+          {lowStockItems.length === 0 && (
+            <div style={{ textAlign: "center", padding: "40px 20px", color: "#22c55e" }}>
+              <div style={{ fontSize: 40 }}>✅</div>
+              <div style={{ marginTop: 8, fontSize: 14 }}>All products are well stocked!</div>
+            </div>
+          )}
+          {lowStockItems.map(p => {
+            const pct = p.minThreshold > 0 ? Math.min(100, ((p.stock || 0) / p.minThreshold) * 100) : 0;
+            return (
+              <div key={p.id} style={{ background: "#1f0a0a", borderRadius: 10, padding: "12px 14px", marginBottom: 8, border: "1px solid #7f1d1d" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                  <div>
+                    <div style={{ fontWeight: 600, fontSize: 14 }}>{p.name}</div>
+                    <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>{p.category || "Uncategorized"} · Min: {p.minThreshold} {p.unit || "units"}</div>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <div style={{ fontWeight: 800, color: "#ef4444", fontSize: 20 }}>{p.stock || 0}</div>
+                    <div style={{ fontSize: 10, color: "#6b7280" }}>{p.unit || "units"} left</div>
+                  </div>
+                </div>
+                <div style={{ height: 4, background: "#2a0a0a", borderRadius: 2, overflow: "hidden" }}>
+                  <div style={{ height: "100%", width: `${pct}%`, background: pct <= 25 ? "#ef4444" : "#f59e0b", borderRadius: 2 }} />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── NEW: Product Card ─────────────────────────────────────────────────────────
+function ProductCard({ product, stockMovements, onEdit, onDelete, onStockIn, onStockOut }) {
+  const [open, setOpen] = useState(false);
+  const movements = [...stockMovements].filter(m => m.productId === product.id).sort((a, b) => new Date(b.date) - new Date(a.date));
+  const isOut = (product.stock || 0) === 0;
+  const isLow = !isOut && product.minThreshold > 0 && (product.stock || 0) <= product.minThreshold;
+  const stockColor = isOut ? "#ef4444" : isLow ? "#f59e0b" : "#22c55e";
+  const borderColor = isOut ? "#7f1d1d" : isLow ? "#78350f" : "#1a1a35";
+  return (
+    <div style={{ background: "#0d0d1f", borderRadius: 12, marginBottom: 10, border: `1px solid ${borderColor}`, overflow: "hidden" }}>
+      <div style={{ padding: "12px 14px", display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }} onClick={() => setOpen(o => !o)}>
+        <div style={{ width: 8, height: 8, borderRadius: "50%", background: stockColor, flexShrink: 0 }} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontWeight: 600, fontSize: 14, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{product.name}</div>
+          <div style={{ fontSize: 11, color: "#4b5563" }}>{product.category || "Uncategorized"}{product.price ? ` · ₹${product.price}` : ""}</div>
+        </div>
+        <div style={{ textAlign: "right", flexShrink: 0 }}>
+          <div style={{ fontWeight: 800, color: stockColor, fontSize: 18 }}>{product.stock || 0}</div>
+          <div style={{ fontSize: 10, color: "#4b5563" }}>{product.unit || "units"}</div>
+        </div>
+        <div style={{ color: "#4b5563", fontSize: 12 }}>{open ? "▲" : "▼"}</div>
+      </div>
+      {open && (
+        <div style={{ padding: "0 14px 14px", borderTop: "1px solid #111120" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8, marginTop: 12 }}>
+            <Stat label="In Stock" value={`${product.stock || 0} ${product.unit || "units"}`} color={stockColor} />
+            <Stat label="Min Threshold" value={product.minThreshold || "Not set"} color="#a78bfa" />
+            <Stat label="Price" value={product.price ? `₹${product.price}` : "—"} color="#60a5fa" />
+          </div>
+          {(isLow || isOut) && (
+            <div style={{ background: isOut ? "#3b0a0a" : "#2a1500", borderRadius: 8, padding: "8px 12px", marginTop: 10, fontSize: 12, color: isOut ? "#ef4444" : "#f59e0b", fontWeight: 600 }}>
+              {isOut ? "🔴 Out of Stock — Restock Immediately" : "⚠️ Low Stock — Restock Needed"}
+            </div>
+          )}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 12 }}>
+            <SmBtn color="#065f46" onClick={onStockIn}>📥 Stock In</SmBtn>
+            <SmBtn color="#0369a1" onClick={onStockOut}>📤 Stock Out</SmBtn>
+            <SmBtn color="#1e1e35" onClick={onEdit}>✏️ Edit</SmBtn>
+            <SmBtn color="#3b0a0a" onClick={onDelete}>🗑</SmBtn>
+          </div>
+          {movements.length > 0 && (
+            <div style={{ marginTop: 12 }}>
+              <div style={{ fontSize: 11, color: "#4b5563", marginBottom: 6, textTransform: "uppercase", letterSpacing: 1 }}>Recent Movements</div>
+              {movements.slice(0, 4).map(m => (
+                <div key={m.id} style={{ display: "flex", justifyContent: "space-between", padding: "5px 0", borderBottom: "1px solid #111120", fontSize: 12 }}>
+                  <span style={{ color: "#6b7280" }}>{m.date}{m.note ? ` · ${m.note}` : ""}</span>
+                  <span style={{ color: m.type === "in" ? "#22c55e" : "#60a5fa", fontWeight: 600 }}>{m.type === "in" ? "+" : "−"}{m.quantity} {product.unit || "units"}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── NEW: Product Modal ────────────────────────────────────────────────────────
+function ProductModal({ product, onClose, onSave }) {
+  const [f, setF] = useState({
+    name: product?.name || "",
+    category: product?.category || "",
+    unit: product?.unit || "units",
+    price: product?.price || "",
+    stock: product?.stock !== undefined ? product.stock : "",
+    minThreshold: product?.minThreshold || "",
+  });
+  const set = k => v => setF(p => ({ ...p, [k]: v }));
+  return (
+    <BottomModal title={product ? "Edit Product" : "Add Product"} onClose={onClose}>
+      <FInput label="Product Name *" value={f.name} onChange={set("name")} placeholder="e.g. Glass Set 6pcs" />
+      <FInput label="Category" value={f.category} onChange={set("category")} placeholder="e.g. Glassware, Ceramics, Cutlery" />
+      <FInput label="Unit" value={f.unit} onChange={set("unit")} placeholder="e.g. box, piece, set, dozen" />
+      <FInput label="Price per Unit (₹)" value={f.price} onChange={set("price")} placeholder="e.g. 500" type="number" />
+      {!product && <FInput label="Opening Stock" value={f.stock} onChange={set("stock")} placeholder="0" type="number" />}
+      <FInput label="Minimum Stock Threshold" value={f.minThreshold} onChange={set("minThreshold")} placeholder="e.g. 10" type="number" />
+      <div style={{ fontSize: 11, color: "#4b5563", marginTop: -8, marginBottom: 14 }}>⚠️ Alert triggers when stock falls at or below this number</div>
+      <Btn color="#7c3aed" onClick={() => {
+        if (!f.name.trim()) return;
+        onSave({ ...f, price: parseFloat(f.price) || 0, stock: parseInt(f.stock) || 0, minThreshold: parseInt(f.minThreshold) || 0 });
+      }} style={{ width: "100%", padding: 12, fontSize: 14, marginTop: 4 }}>
+        {product ? "Save Changes" : "Add Product"}
+      </Btn>
+    </BottomModal>
+  );
+}
+
+// ── NEW: Stock Move Modal ─────────────────────────────────────────────────────
+function StockMoveModal({ product, type, products, onClose, onSave }) {
+  const [f, setF] = useState({ productId: product?.id || "", type: type || "in", quantity: "", note: "", date: todayStr() });
+  const set = k => v => setF(p => ({ ...p, [k]: v }));
+  const selected = product || products.find(p => p.id === f.productId);
+  return (
+    <BottomModal title={type === "in" ? "📥 Stock In" : "📤 Stock Out"} onClose={onClose}>
+      {!product && <FSelect label="Product *" value={f.productId} onChange={set("productId")} options={products.map(p => ({ v: p.id, l: `${p.name} (${p.stock || 0} ${p.unit || "units"})` }))} />}
+      {selected && (
+        <div style={{ background: "#080810", borderRadius: 8, padding: "10px 12px", marginBottom: 12, display: "flex", justifyContent: "space-between" }}>
+          <span style={{ fontSize: 13, color: "#a78bfa", fontWeight: 600 }}>{selected.name}</span>
+          <span style={{ fontSize: 13, color: "#4b5563" }}>Current: {selected.stock || 0} {selected.unit || "units"}</span>
+        </div>
+      )}
+      <FInput label="Quantity *" value={f.quantity} onChange={set("quantity")} placeholder="0" type="number" />
+      <FInput label="Date" value={f.date} onChange={set("date")} type="date" />
+      <FInput label="Note (optional)" value={f.note} onChange={set("note")} placeholder={type === "in" ? "e.g. Received from supplier" : "e.g. Sold to outlet"} />
+      <Btn color={type === "in" ? "#065f46" : "#0369a1"} onClick={() => {
+        const pid = product?.id || f.productId;
+        if (!pid || !f.quantity) return;
+        onSave({ ...f, productId: pid, quantity: parseInt(f.quantity) || 0 });
+      }} style={{ width: "100%", padding: 12, fontSize: 14, marginTop: 4 }}>
+        {type === "in" ? "📥 Add to Stock" : "📤 Remove from Stock"}
+      </Btn>
+    </BottomModal>
+  );
+}
+
+// ── Sub-components (unchanged) ────────────────────────────────────────────────
 function ProgressBar({ label, current, target, fmt, color }) {
   const pct = target > 0 ? Math.min(100, (current / target) * 100) : 0;
   return <div style={{ marginBottom: 10 }}>
@@ -540,7 +852,6 @@ function ProgressBar({ label, current, target, fmt, color }) {
     {target > 0 && <div style={{ fontSize: 10, color: pct >= 100 ? "#22c55e" : "#6b7280", marginTop: 2, textAlign: "right" }}>{Math.round(pct)}%</div>}
   </div>;
 }
-
 function OutletCard({ outlet, collections, fmt, onEdit, onDelete, onCollect, onSale, onWhatsapp, onView, trend }) {
   const status = getStatus(outlet, collections); const m = STATUS_META[status];
   const cols = collections.filter(c => c.outletId === outlet.id);
@@ -571,7 +882,6 @@ function OutletCard({ outlet, collections, fmt, onEdit, onDelete, onCollect, onS
     </div>}
   </div>;
 }
-
 function ReportsTab({ outlets, sales, collections, fmt, onExport, onExportPDF, onBackup, getGrade, getOutletTrend }) {
   const months = useMemo(() => { const map = {}; collections.forEach(c => { const m = c.date?.slice(0, 7); if (m) map[m] = (map[m] || 0) + c.amount; }); return Object.entries(map).sort((a, b) => b[0].localeCompare(a[0])).slice(0, 6); }, [collections]);
   const graded = useMemo(() => outlets.map(o => ({ ...o, g: getGrade(o, collections, sales) })).sort((a, b) => ["A+","A","B","C","D","F"].indexOf(a.g.grade) - ["A+","A","B","C","D","F"].indexOf(b.g.grade)), [outlets, collections, sales]);
@@ -621,7 +931,6 @@ function ReportsTab({ outlets, sales, collections, fmt, onExport, onExportPDF, o
     </div>
   </div>;
 }
-
 function SettingsTab({ pinsDoc, targets, savePins, saveTargets, showToast }) {
   const [ownerPin, setOwnerPin] = useState(pinsDoc.owner);
   const [ownerContact, setOwnerContact] = useState(targets.ownerContact || "");
@@ -646,7 +955,6 @@ function SettingsTab({ pinsDoc, targets, savePins, saveTargets, showToast }) {
     </div>
   </div>;
 }
-
 function BottomModal({ title, children, onClose }) {
   return <div style={{ position: "fixed", inset: 0, background: "#00000090", zIndex: 200, display: "flex", alignItems: "flex-end", justifyContent: "center" }} onClick={e => e.target === e.currentTarget && onClose()}>
     <div style={{ background: "#0d0d1f", borderRadius: "18px 18px 0 0", width: "100%", maxWidth: 500, padding: "20px 16px", maxHeight: "92vh", overflowY: "auto" }}>
@@ -658,7 +966,6 @@ function BottomModal({ title, children, onClose }) {
     </div>
   </div>;
 }
-
 function OutletModal({ outlet, onClose, onSave }) {
   const [f, setF] = useState({ name: outlet?.name || "", area: outlet?.area || "", contact: outlet?.contact || "", notes: outlet?.notes || "", mapsUrl: outlet?.mapsUrl || "" });
   const set = k => v => setF(p => ({ ...p, [k]: v }));
@@ -672,17 +979,8 @@ function OutletModal({ outlet, onClose, onSave }) {
     <Btn color="#7c3aed" onClick={() => f.name.trim() && onSave(f)} style={{ width: "100%", padding: 12, fontSize: 14, marginTop: 4 }}>{outlet ? "Save Changes" : "Add Outlet"}</Btn>
   </BottomModal>;
 }
-
-// Handles both creating a new sale and editing an existing one.
-// When `record` is passed, the form is pre-filled and the amount (and any other field) can be edited.
 function SaleModal({ outlets, preSelected, record, onClose, onSave }) {
-  const [f, setF] = useState({
-    outletId: record?.outletId || preSelected || "",
-    amount: record?.amount ?? "",
-    date: record?.date || todayStr(),
-    items: record?.items || "",
-    deliveryStatus: record?.deliveryStatus || "delivered"
-  });
+  const [f, setF] = useState({ outletId: record?.outletId || preSelected || "", amount: record?.amount ?? "", date: record?.date || todayStr(), items: record?.items || "", deliveryStatus: record?.deliveryStatus || "delivered" });
   const set = k => v => setF(p => ({ ...p, [k]: v }));
   return <BottomModal title={record ? "Edit Sale" : "Record New Sale"} onClose={onClose}>
     <FSelect label="Outlet *" value={f.outletId} onChange={set("outletId")} options={outlets.map(o => ({ v: o.id, l: o.name }))} />
@@ -698,16 +996,8 @@ function SaleModal({ outlets, preSelected, record, onClose, onSave }) {
     <Btn color="#0369a1" onClick={() => f.outletId && f.amount && onSave({ ...f, amount: parseFloat(f.amount) })} style={{ width: "100%", padding: 12, fontSize: 14, marginTop: 4 }}>{record ? "Update Sale" : "Save Sale"}</Btn>
   </BottomModal>;
 }
-
-// Handles both creating a new collection and editing an existing one.
 function CollectionModal({ outlets, preSelected, record, onClose, onSave }) {
-  const [f, setF] = useState({
-    outletId: record?.outletId || preSelected || "",
-    amount: record?.amount ?? "",
-    date: record?.date || todayStr(),
-    note: record?.note || "",
-    payMethod: record?.payMethod || "Cash"
-  });
+  const [f, setF] = useState({ outletId: record?.outletId || preSelected || "", amount: record?.amount ?? "", date: record?.date || todayStr(), note: record?.note || "", payMethod: record?.payMethod || "Cash" });
   const set = k => v => setF(p => ({ ...p, [k]: v }));
   return <BottomModal title={record ? "Edit Collection" : "Record Collection"} onClose={onClose}>
     <FSelect label="Outlet *" value={f.outletId} onChange={set("outletId")} options={outlets.map(o => ({ v: o.id, l: `${o.name}${o.totalDue > 0 ? ` (Due: ₹${Math.round(o.totalDue)})` : ""}` }))} />
@@ -723,7 +1013,6 @@ function CollectionModal({ outlets, preSelected, record, onClose, onSave }) {
     <Btn color="#065f46" onClick={() => f.outletId && f.amount && onSave({ ...f, amount: parseFloat(f.amount) })} style={{ width: "100%", padding: 12, fontSize: 14, marginTop: 4 }}>{record ? "Update Collection" : "Save Collection"}</Btn>
   </BottomModal>;
 }
-
 function TargetModal({ targets, onClose, onSave }) {
   const [f, setF] = useState({ daily: targets.daily || "", monthly: targets.monthly || "" });
   return <BottomModal title="Set Targets" onClose={onClose}>
@@ -732,7 +1021,6 @@ function TargetModal({ targets, onClose, onSave }) {
     <Btn color="#7c3aed" onClick={() => onSave({ ...targets, daily: parseFloat(f.daily) || 0, monthly: parseFloat(f.monthly) || 0 })} style={{ width: "100%", padding: 12, fontSize: 14, marginTop: 4 }}>Save</Btn>
   </BottomModal>;
 }
-
 function OutletDetailModal({ outlet, collections, sales, fmt, onClose, onCollect, onSale, onWhatsapp, grade, trend }) {
   const cols = [...collections].filter(c => c.outletId === outlet.id).sort((a, b) => new Date(b.date) - new Date(a.date));
   const sals = [...sales].filter(s => s.outletId === outlet.id);
@@ -763,7 +1051,6 @@ function OutletDetailModal({ outlet, collections, sales, fmt, onClose, onCollect
     ))}
   </BottomModal>;
 }
-
 function Btn({ color, onClick, children, style = {} }) { return <button onClick={onClick} style={{ background: color, border: "none", color: "#fff", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer", ...style }}>{children}</button>; }
 function SmBtn({ color, onClick, children }) { return <button onClick={onClick} style={{ background: color, border: "none", color: "#e2e0f0", borderRadius: 6, padding: "5px 11px", fontSize: 12, cursor: "pointer" }}>{children}</button>; }
 function Stat({ label, value, color }) { return <div style={{ background: "#080810", borderRadius: 8, padding: "8px 10px" }}><div style={{ fontSize: 10, color: "#4b5563" }}>{label}</div><div style={{ fontSize: 13, fontWeight: 600, color: color || "#e2e0f0", marginTop: 1 }}>{value}</div></div>; }
