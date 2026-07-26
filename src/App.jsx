@@ -14,6 +14,7 @@ const Col = {
   pins: "pins",
   products: "products",           // NEW
   stockMovements: "stockMovements", // NEW
+  repaymentPlans: "repaymentPlans", // NEW
 };
 
 const saveDoc = async (colName, id, data) => {
@@ -174,8 +175,9 @@ export default function App() {
   const [pinsDoc, pinsLoaded]                  = useSingleDoc(Col.pins, "config", { owner: "1234" });
   const [products, productsLoaded]             = useCollection(Col.products);
   const [stockMovements, stockMovementsLoaded] = useCollection(Col.stockMovements);
+  const [repaymentPlans, repaymentPlansLoaded] = useCollection(Col.repaymentPlans);
 
-  const loaded = outletsLoaded && salesLoaded && colsLoaded && logLoaded && targetsLoaded && pinsLoaded && productsLoaded && stockMovementsLoaded;
+  const loaded = outletsLoaded && salesLoaded && colsLoaded && logLoaded && targetsLoaded && pinsLoaded && productsLoaded && stockMovementsLoaded && repaymentPlansLoaded;
 
   const [loggedIn, setLoggedIn]                     = useState(false);
   const [tab, setTab]                               = useState("Dashboard");
@@ -190,6 +192,13 @@ export default function App() {
   const [editingProduct, setEditingProduct]         = useState(null);
   const [stockMoveProduct, setStockMoveProduct]     = useState(null);
   const [stockMoveType, setStockMoveType]           = useState("in");
+  // NEW: search states for Sales / Collections / Dues & Alerts
+  const [salesSearch, setSalesSearch]               = useState("");
+  const [collectionsSearch, setCollectionsSearch]   = useState("");
+  const [duesSearch, setDuesSearch]                 = useState("");
+  // NEW: repayment plans state
+  const [planSearch, setPlanSearch]                 = useState("");
+  const [planOutlet, setPlanOutlet]                 = useState(null);
 
   const showToast = (msg, type = "success") => { setToast({ msg, type }); setTimeout(() => setToast(null), 2500); };
 
@@ -324,6 +333,23 @@ export default function App() {
     window.open(`https://wa.me/${targets.ownerContact?.replace(/\D/g, "")}?text=${encodeURIComponent(lines.join("\n"))}`, "_blank");
   };
 
+  // ── NEW: Repayment Plan helpers ───────────────────────────────────────────
+  const saveRepaymentPlan = async (outletId, data) => {
+    const existing = repaymentPlans.find(p => p.outletId === outletId);
+    const id = existing?.id || uid();
+    await saveDoc(Col.repaymentPlans, id, { id, outletId, createdAt: existing?.createdAt || new Date().toISOString(), ...data });
+    const outlet = outlets.find(o => o.id === outletId);
+    await log("Repayment Plan", `${outlet?.name || ""} — ${data.duration} ${data.type}`);
+    showToast(existing ? "Plan updated!" : "Repayment plan set!");
+  };
+  const deleteRepaymentPlan = async (plan) => {
+    if (!window.confirm("Remove this repayment plan? The outlet will return to calculator mode.")) return;
+    await delDoc(Col.repaymentPlans, plan.id);
+    const outlet = outlets.find(o => o.id === plan.outletId);
+    await log("Repayment Plan Removed", outlet?.name || "");
+    showToast("Plan removed!");
+  };
+
   // ── Computed values ────────────────────────────────────────────────────────
   const areas = useMemo(() => ["All", ...new Set(outlets.map(o => o.area).filter(Boolean))], [outlets]);
   const filteredOutlets = useMemo(() => {
@@ -384,7 +410,7 @@ export default function App() {
 
   if (!loggedIn) return <LoginScreen pins={pinsDoc} onLogin={() => { setLoggedIn(true); log("Login", "Logged in"); setTab("Dashboard"); }} />;
 
-  const TABS = ["Dashboard","Outlets","Sales","Collections","Dues & Alerts","Inventory","Reports","Activity Log","Settings"];
+  const TABS = ["Dashboard","Outlets","Sales","Collections","Dues & Alerts","Repayment Plans","Inventory","Reports","Activity Log","Settings"];
 
   return (
     <div style={{ minHeight: "100vh", background: "#080810", color: "#e2e0f0", fontFamily: "'Sora',sans-serif", paddingBottom: 80 }}>
@@ -505,9 +531,14 @@ export default function App() {
         {/* SALES */}
         {tab === "Sales" && (
           <div>
-            <div style={{ fontSize: 12, color: "#4b5563", marginBottom: 10 }}>{sales.length} records</div>
+            <input value={salesSearch} onChange={e => setSalesSearch(e.target.value)} placeholder="🔍 Search outlet name..." style={{ ...inputSt, marginBottom: 10 }} />
+            <div style={{ fontSize: 12, color: "#4b5563", marginBottom: 10 }}>
+              {sales.filter(s => { const o = outlets.find(x => x.id === s.outletId); return !salesSearch || (o?.name || "").toLowerCase().includes(salesSearch.toLowerCase()); }).length} records
+            </div>
             {sales.length === 0 && <Empty icon="📦" text="No sales yet." />}
-            {[...sales].sort((a, b) => new Date(b.date) - new Date(a.date)).map(s => {
+            {[...sales]
+              .filter(s => { const o = outlets.find(x => x.id === s.outletId); return !salesSearch || (o?.name || "").toLowerCase().includes(salesSearch.toLowerCase()); })
+              .sort((a, b) => new Date(b.date) - new Date(a.date)).map(s => {
               const o = outlets.find(x => x.id === s.outletId);
               return <div key={s.id} style={{ background: "#0d0d1f", borderRadius: 10, padding: "12px 14px", marginBottom: 8, border: "1px solid #1a1a35", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <div><div style={{ fontWeight: 600, fontSize: 14 }}>{o?.name || "?"}</div><div style={{ fontSize: 11, color: "#4b5563", marginTop: 2 }}>{s.date}{s.items ? ` · ${s.items}` : ""}{s.deliveryStatus ? ` · ${s.deliveryStatus === "delivered" ? "✅" : "🕐"} ${s.deliveryStatus}` : ""}</div></div>
@@ -518,15 +549,21 @@ export default function App() {
                 </div>
               </div>;
             })}
+            {sales.length > 0 && sales.filter(s => { const o = outlets.find(x => x.id === s.outletId); return !salesSearch || (o?.name || "").toLowerCase().includes(salesSearch.toLowerCase()); }).length === 0 && <Empty icon="🔍" text="No sales match your search." />}
           </div>
         )}
 
         {/* COLLECTIONS */}
         {tab === "Collections" && (
           <div>
-            <div style={{ fontSize: 12, color: "#4b5563", marginBottom: 10 }}>{collections.length} records</div>
+            <input value={collectionsSearch} onChange={e => setCollectionsSearch(e.target.value)} placeholder="🔍 Search outlet name..." style={{ ...inputSt, marginBottom: 10 }} />
+            <div style={{ fontSize: 12, color: "#4b5563", marginBottom: 10 }}>
+              {collections.filter(c => { const o = outlets.find(x => x.id === c.outletId); return !collectionsSearch || (o?.name || "").toLowerCase().includes(collectionsSearch.toLowerCase()); }).length} records
+            </div>
             {collections.length === 0 && <Empty icon="💰" text="No collections yet." />}
-            {[...collections].sort((a, b) => new Date(b.date) - new Date(a.date)).map(c => {
+            {[...collections]
+              .filter(c => { const o = outlets.find(x => x.id === c.outletId); return !collectionsSearch || (o?.name || "").toLowerCase().includes(collectionsSearch.toLowerCase()); })
+              .sort((a, b) => new Date(b.date) - new Date(a.date)).map(c => {
               const o = outlets.find(x => x.id === c.outletId);
               return <div key={c.id} style={{ background: "#0d0d1f", borderRadius: 10, padding: "12px 14px", marginBottom: 8, border: "1px solid #1a1a35", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <div><div style={{ fontWeight: 600, fontSize: 14 }}>{o?.name || "?"}</div><div style={{ fontSize: 11, color: "#4b5563", marginTop: 2 }}>{c.date}{c.payMethod ? ` · ${c.payMethod}` : ""}{c.note ? ` · ${c.note}` : ""}</div></div>
@@ -537,14 +574,16 @@ export default function App() {
                 </div>
               </div>;
             })}
+            {collections.length > 0 && collections.filter(c => { const o = outlets.find(x => x.id === c.outletId); return !collectionsSearch || (o?.name || "").toLowerCase().includes(collectionsSearch.toLowerCase()); }).length === 0 && <Empty icon="🔍" text="No collections match your search." />}
           </div>
         )}
 
         {/* DUES & ALERTS */}
         {tab === "Dues & Alerts" && (
           <div>
+            <input value={duesSearch} onChange={e => setDuesSearch(e.target.value)} placeholder="🔍 Search outlet name..." style={{ ...inputSt, marginBottom: 14 }} />
             {["danger","warning","good"].map(level => {
-              const list = outlets.filter(o => getStatus(o, collections) === level); if (!list.length) return null;
+              const list = outlets.filter(o => getStatus(o, collections) === level && (!duesSearch || (o.name || "").toLowerCase().includes(duesSearch.toLowerCase()))); if (!list.length) return null;
               const m = STATUS_META[level];
               return <div key={level} style={{ marginBottom: 20 }}>
                 <div style={{ fontWeight: 700, color: m.color, marginBottom: 10, fontSize: 13, textTransform: "uppercase", letterSpacing: 1 }}>{m.label} ({list.length})</div>
@@ -564,7 +603,23 @@ export default function App() {
               </div>;
             })}
             {outlets.length === 0 && <Empty icon="📋" text="Add outlets to see due tracking." />}
+            {outlets.length > 0 && outlets.filter(o => !duesSearch || (o.name || "").toLowerCase().includes(duesSearch.toLowerCase())).length === 0 && <Empty icon="🔍" text="No outlets match your search." />}
           </div>
+        )}
+
+        {/* REPAYMENT PLANS — NEW TAB */}
+        {tab === "Repayment Plans" && (
+          <RepaymentPlansTab
+            outlets={outlets}
+            collections={collections}
+            repaymentPlans={repaymentPlans}
+            search={planSearch}
+            setSearch={setPlanSearch}
+            fmt={fmt}
+            onSetPlan={(outlet) => { setPlanOutlet(outlet); setModal("repaymentPlan"); }}
+            onRemovePlan={deleteRepaymentPlan}
+            onWhatsapp={whatsapp}
+          />
         )}
 
         {/* INVENTORY — NEW TAB */}
@@ -605,17 +660,188 @@ export default function App() {
       </div>
 
       {/* MODALS — existing */}
-      {modal === "outlet" && <OutletModal outlet={editing} onClose={() => { setModal(null); setEditing(null); }} onSave={data => { editing ? updateOutlet(editing.id, data) : addOutlet(data); setModal(null); setEditing(null); }} />}
+      {modal === "outlet" && <OutletModal outlet={editing} onClose={() => { setModal(null); setEditing(null); }} onSave={data => { editing ? updateOutlet(editing.id, data) : addOutlet(data); setModal(null); setEditing(null); }} onDelete={editing ? () => { deleteOutlet(editing); setModal(null); setEditing(null); } : null} />}
       {modal === "sale" && <SaleModal outlets={outlets} preSelected={editing?.id} onClose={() => { setModal(null); setEditing(null); }} onSave={data => { addSale(data); setModal(null); setEditing(null); }} />}
-      {modal === "editSale" && editSaleRecord && <SaleModal outlets={outlets} record={editSaleRecord} onClose={() => { setModal(null); setEditSaleRecord(null); }} onSave={data => { updateSale(editSaleRecord.id, data); setModal(null); setEditSaleRecord(null); }} />}
+      {modal === "editSale" && editSaleRecord && <SaleModal outlets={outlets} record={editSaleRecord} onClose={() => { setModal(null); setEditSaleRecord(null); }} onSave={data => { updateSale(editSaleRecord.id, data); setModal(null); setEditSaleRecord(null); }} onDelete={() => { deleteSale(editSaleRecord); setModal(null); setEditSaleRecord(null); }} />}
       {modal === "collection" && <CollectionModal outlets={outlets} preSelected={editing?.id} onClose={() => { setModal(null); setEditing(null); }} onSave={data => { addCollection(data); setModal(null); setEditing(null); }} />}
-      {modal === "editCollection" && editCollectionRecord && <CollectionModal outlets={outlets} record={editCollectionRecord} onClose={() => { setModal(null); setEditCollectionRecord(null); }} onSave={data => { updateCollection(editCollectionRecord.id, data); setModal(null); setEditCollectionRecord(null); }} />}
+      {modal === "editCollection" && editCollectionRecord && <CollectionModal outlets={outlets} record={editCollectionRecord} onClose={() => { setModal(null); setEditCollectionRecord(null); }} onSave={data => { updateCollection(editCollectionRecord.id, data); setModal(null); setEditCollectionRecord(null); }} onDelete={() => { deleteCollection(editCollectionRecord); setModal(null); setEditCollectionRecord(null); }} />}
       {modal === "target" && <TargetModal targets={targets} onClose={() => setModal(null)} onSave={t => { saveTargets(t); setModal(null); }} />}
       {modal === "outletDetail" && editing && <OutletDetailModal outlet={editing} collections={collections} sales={sales} fmt={fmt} onClose={() => { setModal(null); setEditing(null); }} onCollect={() => setModal("collection")} onSale={() => setModal("sale")} onWhatsapp={() => whatsapp(editing)} grade={getGrade(editing, collections, sales)} trend={getOutletTrend(editing.id)} />}
       {/* MODALS — new inventory */}
-      {modal === "product" && <ProductModal product={editingProduct} onClose={() => { setModal(null); setEditingProduct(null); }} onSave={data => { editingProduct ? updateProduct(editingProduct.id, data) : addProduct(data); setModal(null); setEditingProduct(null); }} />}
+      {modal === "product" && <ProductModal product={editingProduct} onClose={() => { setModal(null); setEditingProduct(null); }} onSave={data => { editingProduct ? updateProduct(editingProduct.id, data) : addProduct(data); setModal(null); setEditingProduct(null); }} onDelete={editingProduct ? () => { deleteProduct(editingProduct); setModal(null); setEditingProduct(null); } : null} />}
       {modal === "stockMove" && <StockMoveModal product={stockMoveProduct} type={stockMoveType} products={products} onClose={() => { setModal(null); setStockMoveProduct(null); }} onSave={data => { addStockMovement(data); setModal(null); setStockMoveProduct(null); }} />}
+      {/* MODAL — new repayment plan */}
+      {modal === "repaymentPlan" && planOutlet && <RepaymentPlanModal outlet={planOutlet} plan={repaymentPlans.find(p => p.outletId === planOutlet.id)} onClose={() => { setModal(null); setPlanOutlet(null); }} onSave={data => { saveRepaymentPlan(planOutlet.id, data); setModal(null); setPlanOutlet(null); }} onDelete={() => { const existing = repaymentPlans.find(p => p.outletId === planOutlet.id); if (existing) deleteRepaymentPlan(existing); setModal(null); setPlanOutlet(null); }} />}
     </div>
+  );
+}
+
+// ── NEW: Repayment Plans helpers & Tab ────────────────────────────────────────
+const PERIOD_DAYS = { weekly: 7, monthly: 30 };
+
+const calcRepaymentProgress = (plan, collections) => {
+  const perPeriod = plan.duration > 0 ? (plan.amount || 0) / plan.duration : 0;
+  const elapsedDays = daysSince(plan.startDate);
+  const periodDays = PERIOD_DAYS[plan.type] || 7;
+  const periodsElapsed = Math.max(0, Math.min(plan.duration, Math.floor(elapsedDays / periodDays) + 1));
+  const plannedSoFar = perPeriod * periodsElapsed;
+  const actualPaid = collections
+    .filter(c => c.outletId === plan.outletId && c.date >= plan.startDate)
+    .reduce((s, c) => s + c.amount, 0);
+  const percentComplete = plan.amount > 0 ? Math.min(100, (actualPaid / plan.amount) * 100) : 0;
+  let status = "on";
+  if (actualPaid >= plannedSoFar * 1.05 && actualPaid > plannedSoFar) status = "ahead";
+  else if (actualPaid < plannedSoFar * 0.95) status = "behind";
+  return { perPeriod, periodsElapsed, plannedSoFar, actualPaid, percentComplete, status };
+};
+
+const PLAN_STATUS_META = {
+  ahead:  { color: "#22c55e", label: "🚀 Ahead of Schedule" },
+  on:     { color: "#60a5fa", label: "✅ On Track" },
+  behind: { color: "#ef4444", label: "⚠️ Behind Schedule" },
+};
+
+function RepaymentPlansTab({ outlets, collections, repaymentPlans, search, setSearch, fmt, onSetPlan, onRemovePlan, onWhatsapp }) {
+  const filtered = useMemo(() => {
+    let list = outlets;
+    if (search) list = list.filter(o => (o.name || "").toLowerCase().includes(search.toLowerCase()));
+    return list;
+  }, [outlets, search]);
+
+  const withPlans = filtered.filter(o => repaymentPlans.some(p => p.outletId === o.id));
+  const withoutPlans = filtered.filter(o => !repaymentPlans.some(p => p.outletId === o.id));
+
+  return (
+    <div>
+      <input value={search} onChange={e => setSearch(e.target.value)} placeholder="🔍 Search outlet name..." style={{ ...inputSt, marginBottom: 12 }} />
+      <div style={{ fontSize: 12, color: "#4b5563", marginBottom: 14 }}>{withPlans.length} on a plan · {withoutPlans.length} in calculator mode</div>
+
+      {filtered.length === 0 && <Empty icon="📅" text="No outlets match your search." />}
+
+      {withPlans.length > 0 && (
+        <div style={{ marginBottom: 20 }}>
+          <div style={{ fontWeight: 700, color: "#a78bfa", marginBottom: 10, fontSize: 13, textTransform: "uppercase", letterSpacing: 1 }}>Active Plans ({withPlans.length})</div>
+          {withPlans.map(o => {
+            const plan = repaymentPlans.find(p => p.outletId === o.id);
+            return <RepaymentPlanCard key={o.id} outlet={o} plan={plan} collections={collections} fmt={fmt} onEditPlan={() => onSetPlan(o)} onRemovePlan={() => onRemovePlan(plan)} onWhatsapp={() => onWhatsapp(o)} />;
+          })}
+        </div>
+      )}
+
+      {withoutPlans.length > 0 && (
+        <div>
+          <div style={{ fontWeight: 700, color: "#4b5563", marginBottom: 10, fontSize: 13, textTransform: "uppercase", letterSpacing: 1 }}>Calculator Mode ({withoutPlans.length})</div>
+          {withoutPlans.map(o => (
+            <div key={o.id} style={{ background: "#0d0d1f", borderRadius: 10, padding: "12px 14px", marginBottom: 8, border: "1px solid #1a1a35", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 14 }}>{o.name}</div>
+                <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>{o.area || "—"} · Due: {fmt(o.totalDue)}</div>
+              </div>
+              <SmBtn color="#7c3aed" onClick={() => onSetPlan(o)}>+ Set Plan</SmBtn>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RepaymentPlanCard({ outlet, plan, collections, fmt, onEditPlan, onRemovePlan, onWhatsapp }) {
+  const [open, setOpen] = useState(false);
+  const prog = calcRepaymentProgress(plan, collections);
+  const meta = PLAN_STATUS_META[prog.status];
+  const periodLabel = plan.type === "weekly" ? "week" : "month";
+
+  return (
+    <div style={{ background: "#0d0d1f", borderRadius: 12, marginBottom: 10, border: `1px solid ${meta.color}33`, overflow: "hidden" }}>
+      <div style={{ padding: "12px 14px", display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }} onClick={() => setOpen(o => !o)}>
+        <div style={{ width: 8, height: 8, borderRadius: "50%", background: meta.color, flexShrink: 0 }} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontWeight: 600, fontSize: 14, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{outlet.name}</div>
+          <div style={{ fontSize: 11, color: meta.color }}>{meta.label}</div>
+        </div>
+        <div style={{ textAlign: "right", flexShrink: 0 }}>
+          <div style={{ fontWeight: 700, color: outlet.totalDue > 0 ? "#ef4444" : "#22c55e", fontSize: 14 }}>{fmt(outlet.totalDue)}</div>
+          <div style={{ fontSize: 10, color: "#4b5563" }}>current due</div>
+        </div>
+        <div style={{ color: "#4b5563", fontSize: 12 }}>{open ? "▲" : "▼"}</div>
+      </div>
+
+      <div style={{ padding: "0 14px 12px" }}>
+        <div style={{ height: 6, background: "#1a1a2e", borderRadius: 3, overflow: "hidden" }}>
+          <div style={{ height: "100%", width: `${prog.percentComplete}%`, background: meta.color, borderRadius: 3, transition: "width 0.5s ease" }} />
+        </div>
+        <div style={{ fontSize: 10, color: "#6b7280", marginTop: 3, textAlign: "right" }}>{Math.round(prog.percentComplete)}% of plan paid</div>
+      </div>
+
+      {open && (
+        <div style={{ padding: "0 14px 14px", borderTop: "1px solid #111120" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 8, marginTop: 12 }}>
+            <Stat label="Duration" value={`${plan.duration} ${plan.type === "weekly" ? "weeks" : "months"}`} color="#a78bfa" />
+            <Stat label={`Per ${periodLabel}`} value={fmt(prog.perPeriod)} color="#60a5fa" />
+            <Stat label="Actually Paid" value={fmt(prog.actualPaid)} color="#22c55e" />
+            <Stat label="Should've Paid" value={fmt(prog.plannedSoFar)} color={meta.color} />
+          </div>
+          <div style={{ fontSize: 11, color: "#4b5563", marginTop: 10 }}>Plan started {plan.startDate} · Set for {fmt(plan.amount)} total</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 12 }}>
+            <SmBtn color="#1e1e35" onClick={onEditPlan}>✏️ Edit Plan</SmBtn>
+            {outlet.contact && <SmBtn color="#1a3a2a" onClick={onWhatsapp}>💬 WA</SmBtn>}
+            <SmBtn color="#3b0a0a" onClick={onRemovePlan}>🗑 Remove Plan</SmBtn>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RepaymentPlanModal({ outlet, plan, onClose, onSave, onDelete }) {
+  const [f, setF] = useState({
+    duration: plan?.duration || "",
+    type: plan?.type || "monthly",
+    startDate: plan?.startDate || todayStr(),
+  });
+  const set = k => v => setF(p => ({ ...p, [k]: v }));
+  const perPeriodPreview = f.duration > 0 ? (outlet.totalDue || 0) / f.duration : 0;
+
+  return (
+    <BottomModal title={plan ? "Edit Repayment Plan" : "Set Repayment Plan"} onClose={onClose}>
+      {plan && (
+        <div style={{ background: "#1a1030", border: "1px solid #3a1a5a", borderRadius: 8, padding: "8px 12px", marginBottom: 14, fontSize: 12, color: "#c4b5fd" }}>
+          ✏️ Editing existing plan for <strong>{outlet.name}</strong>
+        </div>
+      )}
+      <div style={{ background: "#080810", borderRadius: 8, padding: "10px 12px", marginBottom: 14, display: "flex", justifyContent: "space-between" }}>
+        <span style={{ fontSize: 13, color: "#a78bfa", fontWeight: 600 }}>{outlet.name}</span>
+        <span style={{ fontSize: 13, color: "#ef4444", fontWeight: 700 }}>Due: {fmt(outlet.totalDue)}</span>
+      </div>
+
+      <div style={{ marginBottom: 12 }}>
+        <label style={{ fontSize: 11, color: "#6b7280", display: "block", marginBottom: 4, textTransform: "uppercase", letterSpacing: .5 }}>Plan Type</label>
+        <div style={{ display: "flex", gap: 8 }}>
+          {["weekly","monthly"].map(t => <button key={t} onClick={() => set("type")(t)} style={{ flex: 1, background: f.type === t ? "#7c3aed" : "#080810", border: `1px solid ${f.type === t ? "#7c3aed" : "#1a1a35"}`, color: f.type === t ? "#fff" : "#6b7280", borderRadius: 8, padding: "9px", fontSize: 13, cursor: "pointer", textTransform: "capitalize" }}>{t}</button>)}
+        </div>
+      </div>
+
+      <FInput label={`Duration (${f.type === "weekly" ? "weeks" : "months"}) *`} value={f.duration} onChange={set("duration")} placeholder="e.g. 8" type="number" />
+      <FInput label="Start Date" value={f.startDate} onChange={set("startDate")} type="date" />
+
+      {f.duration > 0 && (
+        <div style={{ background: "#0a1f0f", border: "1px solid #14532d", borderRadius: 8, padding: "10px 12px", marginBottom: 14, fontSize: 12, color: "#4ade80" }}>
+          💡 They should pay ~{fmt(perPeriodPreview)} per {f.type === "weekly" ? "week" : "month"} for {f.duration} {f.type === "weekly" ? "weeks" : "months"}
+        </div>
+      )}
+
+      <Btn color="#7c3aed" onClick={() => {
+        if (!f.duration || parseInt(f.duration) <= 0) return;
+        onSave({ duration: parseInt(f.duration), type: f.type, startDate: f.startDate, amount: outlet.totalDue || 0 });
+      }} style={{ width: "100%", padding: 12, fontSize: 14, marginTop: 4 }}>
+        {plan ? "Save Changes" : "Set Plan"}
+      </Btn>
+
+      {plan && (
+        <button onClick={onDelete} style={{ width: "100%", background: "none", border: "1px solid #7f1d1d", color: "#ef4444", borderRadius: 8, padding: 11, fontSize: 13, fontWeight: 600, cursor: "pointer", marginTop: 10 }}>🗑 Remove Plan</button>
+      )}
+    </BottomModal>
   );
 }
 
@@ -786,7 +1012,7 @@ function ProductCard({ product, stockMovements, onEdit, onDelete, onStockIn, onS
 }
 
 // ── NEW: Product Modal ────────────────────────────────────────────────────────
-function ProductModal({ product, onClose, onSave }) {
+function ProductModal({ product, onClose, onSave, onDelete }) {
   const [f, setF] = useState({
     name: product?.name || "",
     category: product?.category || "",
@@ -798,6 +1024,11 @@ function ProductModal({ product, onClose, onSave }) {
   const set = k => v => setF(p => ({ ...p, [k]: v }));
   return (
     <BottomModal title={product ? "Edit Product" : "Add Product"} onClose={onClose}>
+      {product && (
+        <div style={{ background: "#1a1030", border: "1px solid #3a1a5a", borderRadius: 8, padding: "8px 12px", marginBottom: 14, fontSize: 12, color: "#c4b5fd" }}>
+          ✏️ Editing <strong>{product.name}</strong>
+        </div>
+      )}
       <FInput label="Product Name *" value={f.name} onChange={set("name")} placeholder="e.g. Glass Set 6pcs" />
       <FInput label="Category" value={f.category} onChange={set("category")} placeholder="e.g. Glassware, Ceramics, Cutlery" />
       <FInput label="Unit" value={f.unit} onChange={set("unit")} placeholder="e.g. box, piece, set, dozen" />
@@ -811,6 +1042,9 @@ function ProductModal({ product, onClose, onSave }) {
       }} style={{ width: "100%", padding: 12, fontSize: 14, marginTop: 4 }}>
         {product ? "Save Changes" : "Add Product"}
       </Btn>
+      {product && onDelete && (
+        <button onClick={onDelete} style={{ width: "100%", background: "none", border: "1px solid #7f1d1d", color: "#ef4444", borderRadius: 8, padding: 11, fontSize: 13, fontWeight: 600, cursor: "pointer", marginTop: 10 }}>🗑 Delete Product</button>
+      )}
     </BottomModal>
   );
 }
@@ -843,7 +1077,7 @@ function StockMoveModal({ product, type, products, onClose, onSave }) {
   );
 }
 
-// ── Sub-components (unchanged) ────────────────────────────────────────────────
+// ── Sub-components (mostly unchanged) ─────────────────────────────────────────
 function ProgressBar({ label, current, target, fmt, color }) {
   const pct = target > 0 ? Math.min(100, (current / target) * 100) : 0;
   return <div style={{ marginBottom: 10 }}>
@@ -966,10 +1200,15 @@ function BottomModal({ title, children, onClose }) {
     </div>
   </div>;
 }
-function OutletModal({ outlet, onClose, onSave }) {
+function OutletModal({ outlet, onClose, onSave, onDelete }) {
   const [f, setF] = useState({ name: outlet?.name || "", area: outlet?.area || "", contact: outlet?.contact || "", notes: outlet?.notes || "", mapsUrl: outlet?.mapsUrl || "" });
   const set = k => v => setF(p => ({ ...p, [k]: v }));
   return <BottomModal title={outlet ? "Edit Outlet" : "Add New Outlet"} onClose={onClose}>
+    {outlet && (
+      <div style={{ background: "#1a1030", border: "1px solid #3a1a5a", borderRadius: 8, padding: "8px 12px", marginBottom: 14, fontSize: 12, color: "#c4b5fd" }}>
+        ✏️ Editing <strong>{outlet.name}</strong>
+      </div>
+    )}
     <FInput label="Outlet Name *" value={f.name} onChange={set("name")} placeholder="e.g. Rahman Traders" />
     <FInput label="Area / Zone" value={f.area} onChange={set("area")} placeholder="e.g. Kozhikode" />
     <FInput label="Contact Number" value={f.contact} onChange={set("contact")} placeholder="e.g. 9876543210" />
@@ -977,14 +1216,27 @@ function OutletModal({ outlet, onClose, onSave }) {
     <div style={{ fontSize: 11, color: "#4b5563", marginTop: -8, marginBottom: 12 }}>Google Maps → Share → Copy Link → Paste above</div>
     <FInput label="Notes" value={f.notes} onChange={set("notes")} placeholder="Any extra info" />
     <Btn color="#7c3aed" onClick={() => f.name.trim() && onSave(f)} style={{ width: "100%", padding: 12, fontSize: 14, marginTop: 4 }}>{outlet ? "Save Changes" : "Add Outlet"}</Btn>
+    {outlet && onDelete && (
+      <button onClick={onDelete} style={{ width: "100%", background: "none", border: "1px solid #7f1d1d", color: "#ef4444", borderRadius: 8, padding: 11, fontSize: 13, fontWeight: 600, cursor: "pointer", marginTop: 10 }}>🗑 Delete Outlet</button>
+    )}
   </BottomModal>;
 }
-function SaleModal({ outlets, preSelected, record, onClose, onSave }) {
+function SaleModal({ outlets, preSelected, record, onClose, onSave, onDelete }) {
   const [f, setF] = useState({ outletId: record?.outletId || preSelected || "", amount: record?.amount ?? "", date: record?.date || todayStr(), items: record?.items || "", deliveryStatus: record?.deliveryStatus || "delivered" });
+  const [touched, setTouched] = useState(false);
   const set = k => v => setF(p => ({ ...p, [k]: v }));
+  const missingOutlet = touched && !f.outletId;
+  const missingAmount = touched && !f.amount;
   return <BottomModal title={record ? "Edit Sale" : "Record New Sale"} onClose={onClose}>
+    {record && (
+      <div style={{ background: "#1a1030", border: "1px solid #3a1a5a", borderRadius: 8, padding: "8px 12px", marginBottom: 14, fontSize: 12, color: "#c4b5fd" }}>
+        ✏️ Editing sale of {fmt(record.amount)} dated {record.date}
+      </div>
+    )}
     <FSelect label="Outlet *" value={f.outletId} onChange={set("outletId")} options={outlets.map(o => ({ v: o.id, l: o.name }))} />
+    {missingOutlet && <div style={{ fontSize: 11, color: "#ef4444", marginTop: -8, marginBottom: 12 }}>Please select an outlet</div>}
     <FInput label="Amount (₹) *" value={f.amount} onChange={set("amount")} placeholder="0" type="number" />
+    {missingAmount && <div style={{ fontSize: 11, color: "#ef4444", marginTop: -8, marginBottom: 12 }}>Please enter an amount</div>}
     <FInput label="Items / Description" value={f.items} onChange={set("items")} placeholder="e.g. 50 glass sets, 20 plates" />
     <FInput label="Date" value={f.date} onChange={set("date")} type="date" />
     <div style={{ marginBottom: 12 }}>
@@ -993,15 +1245,28 @@ function SaleModal({ outlets, preSelected, record, onClose, onSave }) {
         {["delivered","pending"].map(s => <button key={s} onClick={() => set("deliveryStatus")(s)} style={{ flex: 1, background: f.deliveryStatus === s ? "#0369a1" : "#080810", border: `1px solid ${f.deliveryStatus === s ? "#0369a1" : "#1a1a35"}`, color: f.deliveryStatus === s ? "#fff" : "#6b7280", borderRadius: 8, padding: "9px", fontSize: 13, cursor: "pointer" }}>{s === "delivered" ? "✅ Delivered" : "🕐 Pending"}</button>)}
       </div>
     </div>
-    <Btn color="#0369a1" onClick={() => f.outletId && f.amount && onSave({ ...f, amount: parseFloat(f.amount) })} style={{ width: "100%", padding: 12, fontSize: 14, marginTop: 4 }}>{record ? "Update Sale" : "Save Sale"}</Btn>
+    <Btn color="#0369a1" onClick={() => { setTouched(true); if (f.outletId && f.amount) onSave({ ...f, amount: parseFloat(f.amount) }); }} style={{ width: "100%", padding: 12, fontSize: 14, marginTop: 4 }}>{record ? "Update Sale" : "Save Sale"}</Btn>
+    {record && onDelete && (
+      <button onClick={onDelete} style={{ width: "100%", background: "none", border: "1px solid #7f1d1d", color: "#ef4444", borderRadius: 8, padding: 11, fontSize: 13, fontWeight: 600, cursor: "pointer", marginTop: 10 }}>🗑 Delete Sale</button>
+    )}
   </BottomModal>;
 }
-function CollectionModal({ outlets, preSelected, record, onClose, onSave }) {
+function CollectionModal({ outlets, preSelected, record, onClose, onSave, onDelete }) {
   const [f, setF] = useState({ outletId: record?.outletId || preSelected || "", amount: record?.amount ?? "", date: record?.date || todayStr(), note: record?.note || "", payMethod: record?.payMethod || "Cash" });
+  const [touched, setTouched] = useState(false);
   const set = k => v => setF(p => ({ ...p, [k]: v }));
+  const missingOutlet = touched && !f.outletId;
+  const missingAmount = touched && !f.amount;
   return <BottomModal title={record ? "Edit Collection" : "Record Collection"} onClose={onClose}>
+    {record && (
+      <div style={{ background: "#1a1030", border: "1px solid #3a1a5a", borderRadius: 8, padding: "8px 12px", marginBottom: 14, fontSize: 12, color: "#c4b5fd" }}>
+        ✏️ Editing collection of {fmt(record.amount)} dated {record.date}
+      </div>
+    )}
     <FSelect label="Outlet *" value={f.outletId} onChange={set("outletId")} options={outlets.map(o => ({ v: o.id, l: `${o.name}${o.totalDue > 0 ? ` (Due: ₹${Math.round(o.totalDue)})` : ""}` }))} />
+    {missingOutlet && <div style={{ fontSize: 11, color: "#ef4444", marginTop: -8, marginBottom: 12 }}>Please select an outlet</div>}
     <FInput label="Amount (₹) *" value={f.amount} onChange={set("amount")} placeholder="0" type="number" />
+    {missingAmount && <div style={{ fontSize: 11, color: "#ef4444", marginTop: -8, marginBottom: 12 }}>Please enter an amount</div>}
     <div style={{ marginBottom: 12 }}>
       <label style={{ fontSize: 11, color: "#6b7280", display: "block", marginBottom: 4, textTransform: "uppercase", letterSpacing: .5 }}>Payment Method</label>
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -1010,7 +1275,10 @@ function CollectionModal({ outlets, preSelected, record, onClose, onSave }) {
     </div>
     <FInput label="Date" value={f.date} onChange={set("date")} type="date" />
     <FInput label="Note (optional)" value={f.note} onChange={set("note")} placeholder="e.g. Partial payment" />
-    <Btn color="#065f46" onClick={() => f.outletId && f.amount && onSave({ ...f, amount: parseFloat(f.amount) })} style={{ width: "100%", padding: 12, fontSize: 14, marginTop: 4 }}>{record ? "Update Collection" : "Save Collection"}</Btn>
+    <Btn color="#065f46" onClick={() => { setTouched(true); if (f.outletId && f.amount) onSave({ ...f, amount: parseFloat(f.amount) }); }} style={{ width: "100%", padding: 12, fontSize: 14, marginTop: 4 }}>{record ? "Update Collection" : "Save Collection"}</Btn>
+    {record && onDelete && (
+      <button onClick={onDelete} style={{ width: "100%", background: "none", border: "1px solid #7f1d1d", color: "#ef4444", borderRadius: 8, padding: 11, fontSize: 13, fontWeight: 600, cursor: "pointer", marginTop: 10 }}>🗑 Delete Collection</button>
+    )}
   </BottomModal>;
 }
 function TargetModal({ targets, onClose, onSave }) {
