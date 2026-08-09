@@ -15,6 +15,7 @@ const Col = {
   products: "products",           // NEW
   stockMovements: "stockMovements", // NEW
   repaymentPlans: "repaymentPlans", // NEW
+  routeVisits: "routeVisits",       // NEW
 };
 
 const saveDoc = async (colName, id, data) => {
@@ -176,8 +177,9 @@ export default function App() {
   const [products, productsLoaded]             = useCollection(Col.products);
   const [stockMovements, stockMovementsLoaded] = useCollection(Col.stockMovements);
   const [repaymentPlans, repaymentPlansLoaded] = useCollection(Col.repaymentPlans);
+  const [routeVisits, routeVisitsLoaded]       = useCollection(Col.routeVisits);
 
-  const loaded = outletsLoaded && salesLoaded && colsLoaded && logLoaded && targetsLoaded && pinsLoaded && productsLoaded && stockMovementsLoaded && repaymentPlansLoaded;
+  const loaded = outletsLoaded && salesLoaded && colsLoaded && logLoaded && targetsLoaded && pinsLoaded && productsLoaded && stockMovementsLoaded && repaymentPlansLoaded && routeVisitsLoaded;
 
   const [loggedIn, setLoggedIn]                     = useState(false);
   const [tab, setTab]                               = useState("Dashboard");
@@ -257,6 +259,12 @@ export default function App() {
     await saveDoc(Col.collections, id, { id, ...data });
     const outlet = outlets.find(o => o.id === data.outletId);
     await saveDoc(Col.outlets, data.outletId, { ...outlet, totalDue: Math.max(0, (outlet.totalDue || 0) - data.amount) });
+    // Auto-mark this outlet as visited on the route for the collection's date
+    const alreadyVisited = routeVisits.some(r => r.outletId === data.outletId && r.date === data.date && r.status === "visited");
+    if (!alreadyVisited) {
+      const vid = uid();
+      await saveDoc(Col.routeVisits, vid, { id: vid, outletId: data.outletId, date: data.date, status: "visited" });
+    }
     await log("Collection", `${outlet?.name} — ${fmt(data.amount)}`); showToast("Collection saved!");
   };
   const updateCollection = async (id, data) => {
@@ -350,6 +358,27 @@ export default function App() {
     showToast("Plan removed!");
   };
 
+  // ── NEW: Route visit helpers ──────────────────────────────────────────────
+  const toggleVisited = async (outlet, date) => {
+    const existing = routeVisits.find(r => r.outletId === outlet.id && r.date === date && r.status === "visited");
+    if (existing) {
+      await delDoc(Col.routeVisits, existing.id);
+      await log("Route", `Unmarked visit — ${outlet.name}`);
+      showToast("Unmarked.");
+    } else {
+      const id = uid();
+      await saveDoc(Col.routeVisits, id, { id, outletId: outlet.id, date, status: "visited" });
+      await log("Route", `Marked visited — ${outlet.name}`);
+      showToast("✓ Marked visited!");
+    }
+  };
+  const clearMissed = async (outlet, date) => {
+    const id = uid();
+    await saveDoc(Col.routeVisits, id, { id, outletId: outlet.id, date, status: "cleared" });
+    await log("Route", `Cleared missed visit — ${outlet.name}`);
+    showToast("Cleared — starting fresh!");
+  };
+
   // ── Computed values ────────────────────────────────────────────────────────
   const areas = useMemo(() => ["All", ...new Set(outlets.map(o => o.area).filter(Boolean))], [outlets]);
   const filteredOutlets = useMemo(() => {
@@ -410,7 +439,7 @@ export default function App() {
 
   if (!loggedIn) return <LoginScreen pins={pinsDoc} onLogin={() => { setLoggedIn(true); log("Login", "Logged in"); setTab("Dashboard"); }} />;
 
-  const TABS = ["Dashboard","Outlets","Sales","Collections","Dues & Alerts","Repayment Plans","Inventory","Reports","Activity Log","Settings"];
+  const TABS = ["Dashboard","Outlets","Sales","Collections","Dues & Alerts","Routes","Repayment Plans","Inventory","Reports","Activity Log","Settings"];
 
   return (
     <div style={{ minHeight: "100vh", background: "#080810", color: "#e2e0f0", fontFamily: "'Sora',sans-serif", paddingBottom: 80 }}>
@@ -605,6 +634,21 @@ export default function App() {
             {outlets.length === 0 && <Empty icon="📋" text="Add outlets to see due tracking." />}
             {outlets.length > 0 && outlets.filter(o => !duesSearch || (o.name || "").toLowerCase().includes(duesSearch.toLowerCase())).length === 0 && <Empty icon="🔍" text="No outlets match your search." />}
           </div>
+        )}
+
+        {/* ROUTES — NEW TAB */}
+        {tab === "Routes" && (
+          <RoutesTab
+            outlets={outlets}
+            collections={collections}
+            repaymentPlans={repaymentPlans}
+            routeVisits={routeVisits}
+            fmt={fmt}
+            onToggleVisited={toggleVisited}
+            onClearMissed={clearMissed}
+            onCollect={(outlet) => { setEditing(outlet); setModal("collection"); }}
+            onView={(outlet) => { setEditing(outlet); setModal("outletDetail"); }}
+          />
         )}
 
         {/* REPAYMENT PLANS — NEW TAB */}
@@ -844,6 +888,140 @@ function RepaymentPlanModal({ outlet, plan, onClose, onSave, onDelete }) {
     </BottomModal>
   );
 }
+
+// ── NEW: Routes Tab ────────────────────────────────────────────────────────────
+function dateOffset(days) { const d = new Date(); d.setDate(d.getDate() - days); return d.toISOString().split("T")[0]; }
+
+function getRouteTarget(outlet, repaymentPlans) {
+  if (outlet.manualTarget > 0) return { amount: outlet.manualTarget, source: "Manual" };
+  const plan = repaymentPlans.find(p => p.outletId === outlet.id);
+  if (plan && plan.duration > 0) return { amount: (plan.amount || 0) / plan.duration, source: "Plan" };
+  return null;
+}
+
+function RoutesTab({ outlets, collections, repaymentPlans, routeVisits, fmt, onToggleVisited, onClearMissed, onCollect, onView }) {
+  const todayMonIdx = (new Date().getDay() + 6) % 7; // 0=Mon ... 6=Sun
+  const [selectedDay, setSelectedDay] = useState(todayMonIdx);
+  const [search, setSearch] = useState("");
+
+  const missed = useMemo(() => {
+    const list = [];
+    outlets.forEach(o => {
+      (o.collectionDays || []).forEach(dayIdx => {
+        const diff = todayMonIdx - dayIdx;
+        if (diff > 0) {
+          const date = dateOffset(diff);
+          const resolved = routeVisits.some(r => r.outletId === o.id && r.date === date && (r.status === "visited" || r.status === "cleared"));
+          if (!resolved) list.push({ outlet: o, dayIdx, date });
+        }
+      });
+    });
+    return list;
+  }, [outlets, routeVisits, todayMonIdx]);
+
+  const dayOutlets = useMemo(() => {
+    let list = outlets.filter(o => (o.collectionDays || []).includes(selectedDay));
+    if (search) list = list.filter(o => (o.name || "").toLowerCase().includes(search.toLowerCase()));
+    return list;
+  }, [outlets, selectedDay, search]);
+
+  const diff = todayMonIdx - selectedDay;
+  const isToday = diff === 0;
+  const isUpcoming = diff < 0;
+  const occurrenceDate = diff >= 0 ? dateOffset(diff) : null;
+
+  const visitedSet = useMemo(() => new Set(routeVisits.filter(r => r.date === occurrenceDate && r.status === "visited").map(r => r.outletId)), [routeVisits, occurrenceDate]);
+  const clearedSet = useMemo(() => new Set(routeVisits.filter(r => r.date === occurrenceDate && r.status === "cleared").map(r => r.outletId)), [routeVisits, occurrenceDate]);
+
+  const dayTargetTotal = dayOutlets.reduce((s, o) => { const t = getRouteTarget(o, repaymentPlans); return s + (t ? t.amount : 0); }, 0);
+  const dayCollected = occurrenceDate ? collections.filter(c => c.date === occurrenceDate && dayOutlets.some(o => o.id === c.outletId)).reduce((s, c) => s + c.amount, 0) : 0;
+  const visitedCount = dayOutlets.filter(o => visitedSet.has(o.id)).length;
+
+  return (
+    <div>
+      {missed.length > 0 && (
+        <div style={{ background: "#1f0a0a", borderRadius: 12, padding: 14, marginBottom: 16, border: "1px solid #7f1d1d" }}>
+          <div style={{ fontWeight: 700, fontSize: 13, color: "#ef4444", marginBottom: 10 }}>⚠️ Missed Visits ({missed.length})</div>
+          {missed.map(({ outlet, dayIdx, date }) => (
+            <div key={`${outlet.id}-${date}`} style={{ background: "#0d0d1f", borderRadius: 8, padding: "10px 12px", marginBottom: 6, border: "1px solid #3b0a0a" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 13 }}>{outlet.name}</div>
+                  <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>Missed {ROUTE_DAY_NAMES_FULL[dayIdx]} ({date}) · Due: {fmt(outlet.totalDue)}</div>
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                <SmBtn color="#065f46" onClick={() => onCollect(outlet)}>💰 Collect</SmBtn>
+                <SmBtn color="#1e1e35" onClick={() => onClearMissed(outlet, date)}>↻ Start Fresh</SmBtn>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 6, marginBottom: 14, overflowX: "auto", paddingBottom: 2 }}>
+        {ROUTE_DAY_NAMES_FULL.map((d, idx) => (
+          <button key={d} onClick={() => setSelectedDay(idx)} style={{ background: selectedDay === idx ? "#7c3aed" : "#1a1a2e", border: idx === todayMonIdx ? "1px solid #a78bfa" : "1px solid transparent", color: selectedDay === idx ? "#fff" : "#6b7280", borderRadius: 20, padding: "6px 14px", fontSize: 12, cursor: "pointer", whiteSpace: "nowrap", fontWeight: idx === todayMonIdx ? 700 : 400 }}>
+            {d.slice(0, 3)}{idx === todayMonIdx ? " •" : ""}
+          </button>
+        ))}
+      </div>
+
+      <input value={search} onChange={e => setSearch(e.target.value)} placeholder="🔍 Search outlet name..." style={{ ...inputSt, marginBottom: 12 }} />
+
+      {occurrenceDate && dayOutlets.length > 0 && (
+        <div style={{ background: "#0d0d1f", borderRadius: 12, padding: 14, marginBottom: 14, border: "1px solid #1a1a35" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 6 }}>
+            <span style={{ color: "#6b7280" }}>{visitedCount} of {dayOutlets.length} visited</span>
+            <span style={{ color: "#e2e0f0" }}>{fmt(dayCollected)}{dayTargetTotal > 0 ? ` / ${fmt(dayTargetTotal)} target` : ""}</span>
+          </div>
+          <div style={{ height: 6, background: "#1a1a2e", borderRadius: 3, overflow: "hidden" }}>
+            <div style={{ height: "100%", width: `${dayOutlets.length ? (visitedCount / dayOutlets.length) * 100 : 0}%`, background: "#22c55e", borderRadius: 3, transition: "width 0.5s ease" }} />
+          </div>
+        </div>
+      )}
+
+      <div style={{ fontSize: 12, color: "#4b5563", marginBottom: 10 }}>
+        {ROUTE_DAY_NAMES_FULL[selectedDay]}{isToday ? " (Today)" : isUpcoming ? " · Upcoming" : ` · ${occurrenceDate}`} — {dayOutlets.length} outlets scheduled
+      </div>
+
+      {dayOutlets.length === 0 && <Empty icon="🗓️" text="No outlets scheduled for this day. Assign route days in the outlet's edit form." />}
+
+      {dayOutlets.map(o => {
+        const target = getRouteTarget(o, repaymentPlans);
+        const visited = visitedSet.has(o.id);
+        const cleared = clearedSet.has(o.id);
+        return (
+          <div key={o.id} style={{ background: "#0d0d1f", borderRadius: 12, padding: "12px 14px", marginBottom: 8, border: `1px solid ${visited ? "#14532d" : "#1a1a35"}` }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 600, fontSize: 14 }}>{o.name}</div>
+                <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>{o.area || "—"}{target ? ` · 🎯 ${fmt(target.amount)} target (${target.source})` : ""}</div>
+              </div>
+              <div style={{ textAlign: "right", flexShrink: 0 }}>
+                <div style={{ fontWeight: 700, color: o.totalDue > 0 ? "#ef4444" : "#22c55e", fontSize: 14 }}>{fmt(o.totalDue)}</div>
+                <div style={{ fontSize: 10, color: "#4b5563" }}>due</div>
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 6, marginTop: 10, flexWrap: "wrap", alignItems: "center" }}>
+              {isUpcoming ? (
+                <span style={{ fontSize: 11, color: "#4b5563" }}>📅 Scheduled — actions unlock on the day</span>
+              ) : (
+                <>
+                  <SmBtn color="#065f46" onClick={() => onCollect(o)}>💰 Collect</SmBtn>
+                  <SmBtn color={visited ? "#1a3a2a" : "#1e1e35"} onClick={() => onToggleVisited(o, occurrenceDate)}>{visited ? "✅ Visited" : "✓ Mark Visited"}</SmBtn>
+                  <SmBtn color="#1a1a2e" onClick={() => onView(o)}>👁 Detail</SmBtn>
+                  {!isToday && !visited && cleared && <span style={{ fontSize: 11, color: "#6b7280" }}>Cleared</span>}
+                </>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+const ROUTE_DAY_NAMES_FULL = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
 
 // ── NEW: Inventory Tab ────────────────────────────────────────────────────────
 function InventoryTab({ products, stockMovements, productAnalytics, lowStockItems, onAddProduct, onEditProduct, onDeleteProduct, onStockIn, onStockOut, sendLowStockAlert }) {
@@ -1200,9 +1378,11 @@ function BottomModal({ title, children, onClose }) {
     </div>
   </div>;
 }
+const ROUTE_DAY_NAMES = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
 function OutletModal({ outlet, onClose, onSave, onDelete }) {
-  const [f, setF] = useState({ name: outlet?.name || "", area: outlet?.area || "", contact: outlet?.contact || "", notes: outlet?.notes || "", mapsUrl: outlet?.mapsUrl || "" });
+  const [f, setF] = useState({ name: outlet?.name || "", area: outlet?.area || "", contact: outlet?.contact || "", notes: outlet?.notes || "", mapsUrl: outlet?.mapsUrl || "", collectionDays: outlet?.collectionDays || [], manualTarget: outlet?.manualTarget || "" });
   const set = k => v => setF(p => ({ ...p, [k]: v }));
+  const toggleDay = (idx) => setF(p => ({ ...p, collectionDays: p.collectionDays.includes(idx) ? p.collectionDays.filter(d => d !== idx) : [...p.collectionDays, idx] }));
   return <BottomModal title={outlet ? "Edit Outlet" : "Add New Outlet"} onClose={onClose}>
     {outlet && (
       <div style={{ background: "#1a1030", border: "1px solid #3a1a5a", borderRadius: 8, padding: "8px 12px", marginBottom: 14, fontSize: 12, color: "#c4b5fd" }}>
@@ -1214,8 +1394,18 @@ function OutletModal({ outlet, onClose, onSave, onDelete }) {
     <FInput label="Contact Number" value={f.contact} onChange={set("contact")} placeholder="e.g. 9876543210" />
     <FInput label="Google Maps Link" value={f.mapsUrl} onChange={set("mapsUrl")} placeholder="Paste Google Maps URL" />
     <div style={{ fontSize: 11, color: "#4b5563", marginTop: -8, marginBottom: 12 }}>Google Maps → Share → Copy Link → Paste above</div>
+    <div style={{ marginBottom: 12 }}>
+      <label style={{ fontSize: 11, color: "#6b7280", display: "block", marginBottom: 4, textTransform: "uppercase", letterSpacing: .5 }}>Collection Route Days</label>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        {ROUTE_DAY_NAMES.map((d, idx) => (
+          <button key={d} onClick={() => toggleDay(idx)} style={{ background: f.collectionDays.includes(idx) ? "#7c3aed" : "#080810", border: `1px solid ${f.collectionDays.includes(idx) ? "#7c3aed" : "#1a1a35"}`, color: f.collectionDays.includes(idx) ? "#fff" : "#6b7280", borderRadius: 8, padding: "8px 10px", fontSize: 12, cursor: "pointer", minWidth: 42 }}>{d}</button>
+        ))}
+      </div>
+      <div style={{ fontSize: 11, color: "#4b5563", marginTop: 6 }}>Pick every day you're scheduled to visit this outlet. Shows up in the Routes tab.</div>
+    </div>
+    <FInput label="Manual Collection Target (₹)" value={f.manualTarget} onChange={set("manualTarget")} placeholder="Leave blank to auto-use Repayment Plan amount" type="number" />
     <FInput label="Notes" value={f.notes} onChange={set("notes")} placeholder="Any extra info" />
-    <Btn color="#7c3aed" onClick={() => f.name.trim() && onSave(f)} style={{ width: "100%", padding: 12, fontSize: 14, marginTop: 4 }}>{outlet ? "Save Changes" : "Add Outlet"}</Btn>
+    <Btn color="#7c3aed" onClick={() => f.name.trim() && onSave({ ...f, manualTarget: parseFloat(f.manualTarget) || 0 })} style={{ width: "100%", padding: 12, fontSize: 14, marginTop: 4 }}>{outlet ? "Save Changes" : "Add Outlet"}</Btn>
     {outlet && onDelete && (
       <button onClick={onDelete} style={{ width: "100%", background: "none", border: "1px solid #7f1d1d", color: "#ef4444", borderRadius: 8, padding: 11, fontSize: 13, fontWeight: 600, cursor: "pointer", marginTop: 10 }}>🗑 Delete Outlet</button>
     )}
